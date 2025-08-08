@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>Spencer Nelson’s Personal Finances</title>
+  <style>
+    :root { --brand: #111111; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; color: #111; }
+    header { background: var(--brand); color: #fff; padding: 48px 20px; }
+    main { max-width: 820px; margin: 0 auto; padding: 28px 20px 60px; line-height: 1.6; }
+    h1 { margin: 0 0 8px; font-size: 32px; }
+    .tag { opacity: .9; }
+    a { color: #0a66c2; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card { border: 1px solid #e6e6e6; border-radius: 12px; padding: 16px 18px; margin: 16px 0; background: #fff; }
+    footer { color: #666; font-size: 14px; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Spencer Nelson’s Personal Finances</h1>
+    <div class="tag">Personal project – not offered to the public</div>
+  </header>
+  <main>
+    <p><strong>What this is:</strong> a private workflow I built to view my account balances, transactions, and investments in one place. It uses <em>Plaid</em> to connect to my own financial institutions, and <em>n8n</em> to automate data pulls and personal notifications.</p>
+
+    <div class="card">
+      <h2>Key points</h2>
+      <ul>
+        <li>This app is for my <strong>personal use only</strong>. No signup, no third-party users.</li>
+        <li>I do <strong>not</strong> sell, share, or monetize any data.</li>
+        <li>Connections are handled via <a href="https://plaid.com">Plaid</a>. Tokens are stored privately in my n8n instance.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Privacy</h2>
+      <p>See the full <a href="./privacy.html">Privacy Policy</a> for details on data access, storage, and retention.</p>
+    </div>
+
+    <div class="card">
+      <h2>Contact</h2>
+      <p>Email: <a href="mailto:spenelson1@gmail.com">spenelson1@gmail.com</a></p>
+    </div>
+
+    <footer>© <span id="y"></span> Spencer Nelson</footer>
+  </main>
+  <script>document.getElementById('y').textContent = new Date().getFullYear();</script>
+</body>
+</html>
+
