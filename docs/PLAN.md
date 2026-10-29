@@ -1,11 +1,12 @@
 # Plan: iMessage AI nutrition coach (MVP)
 
-**Status:** v2.1 for owner review (2026-10-29). Nothing is built yet.
+**Status:** v2.2 for owner review (2026-10-29). Nothing is built yet.
 
 **How this version was made:**
 - v1 went to five independent adversarial reviewers: spec traceability, pipeline concurrency, agent/LLM design, privacy/safety, and data and developer experience.
 - v2 folded in their 87 findings, 11 of them blockers.
-- v2.1 fixes the 48 issues a verification pass then found in v2, mostly seams where two reviewers' fixes met.
+- v2.1 fixed the 48 issues a verification pass then found in v2, mostly seams where two reviewers' fixes met.
+- v2.2 fixes the 14 issues a final pass found in v2.1.
 - Several findings were settled by experiments against a local Postgres 16. The main one: v1's turn-locking algorithm stranded messages under small clock skew. §2.1 replaces it.
 
 **Inputs:**
@@ -51,9 +52,10 @@
     verify → suppression check → upsert user → PER-MESSAGE SCREEN on the in-memory text:
       keywords (STOP family → set pause NOW), crisis/ED/opt-out phrases → store only tags
     → consent-aware insert (pre-consent: no media, no free text) → dedupe → debounce state
+    → PRIORITY INTENTS written in the same transaction (crisis copy; the one STOP confirmation)
                                                                          │ after(kick)
                                                                          ▼
-  kick(user):  [1] PRIORITY PATH — crisis/care copy and the one STOP confirmation, outside lease & debounce
+  kick(user):  [1] PRIORITY PATH — send unsent priority intents (conditional claim), outside lease & debounce
                [2] Haiku triage per text (consented) and [3] single-flight media prefetch, during the debounce
                [4] LEASE FIRST (heartbeat) → [5] wait for process_after (re-read, re-sleep) → claim burst
                    → ensureMedia + ensureTriage → TurnRouter → fenced writes → release → recheck
@@ -63,7 +65,7 @@
     → triage/care → access gate (M7) → Agent (Sonnet tool loop; tools compute every number)
                                                                          ▼
   OutboundSender: code-owned bubbles (totals, safety copy) + model text → intents (idempotent)
-    → re-check pause/existence right before EACH send → adapter.send → record
+    → re-check pause/existence right before EACH send (pause-exempt: priority, safety, command) → adapter.send → record
   /api/cron/tick (any trigger): sweep · draft auto-commit · retention purges · proactive check-ins · metrics
   /api/internal/kick: self-handoff when an invocation runs low on time
   /admin (Basic auth): aggregate metrics only
@@ -76,7 +78,7 @@
 - **Safety and opt-outs always win.** The order is: priority path (crisis screen, STOP) → commands → onboarding → triage/care → access gate → agent. No onboarding, billing or debounce state can delay or suppress a crisis reply, an opt-out, HELP or DELETE.
 - **Consent is deterministic.** Health-data consent, age, proactive opt-ins, STOP/START/HELP/DELETE/MY DATA and the crisis replies are code paths. The LLM never decides that consent was given.
 - **One turn per user at a time.** This is enforced by the DB lease, and every turn side-effect write is fenced on still holding it. Check-in composition takes the same lease.
-- **STOP takes effect inside ingest,** and pause is re-checked right before every individual send.
+- **STOP takes effect inside ingest,** and pause is re-checked right before every individual send. Exempt from the pause check: the `priority`, `safety` and `command` outbound kinds (crisis copy, the STOP confirmation, and the START/HELP/DELETE/MY DATA/BILLING replies). Ordinary replies and check-ins are blocked.
 - **Postgres is the only shared state.** Every time-sensitive SQL statement takes `$now` from the injected `Clock`.
 - **Provider code is isolated** in `src/server/channels/<provider>/`.
 - **Privacy:**
@@ -93,7 +95,7 @@
    - Sendblue: constant-time compare of the `sb-signing-secret` header, plus an unguessable path token.
    - Simulator: dev-only guards (§3).
    - Group chats, tapbacks, status callbacks and non-E.164 handles are **acknowledged and never persisted**; only a count is kept.
-2. **Suppression check:** look up `HMAC(phone)` in `suppressions` (for example a declined minor). A suppressed number gets no users row and nothing stored, at most a rate-limited fixed reply.
+2. **Suppression check:** look up `HMAC(phone)` in `suppressions` (for example a declined minor). A suppressed number gets no users row and nothing stored. It gets at most one fixed reply per 24 h, tracked by `suppressions.last_reply_at` and sent directly through the adapter with no stored row.
 3. **Upsert the user** by `phone_e164`, setting `users.line` to the line they texted.
 4. **Per-message screen** on the in-memory text, before anything is stored. It runs on each message, never on a merged burst:
    - **Keywords.** Matched on the whole message after trimming, case-folding and stripping punctuation.
@@ -102,7 +104,7 @@
    - **Crisis, ED and opt-out phrases.** A deterministic, high-precision regex list for every user, including pre-consent and gated ones:
      - emergency (chest pain, can't breathe, throat closing, overdose, fainted);
      - self-harm;
-     - ED (purge, laxative, diuretic, diet pills, starve, fasting for N days);
+     - ED, as phrase-level patterns rather than bare words ("starving myself", "taking laxatives to", "purging after", "diet pills", "haven't eaten in N days"; never a bare "starving");
      - plain-language opt-out ("stop texting me", "leave me alone").
    - Hits store only a tag (`crisis_kind`, or `keyword='STOP'` for opt-out phrases), never the text.
 5. **Consent-aware insert:** `INSERT inbound_messages … ON CONFLICT (provider, provider_message_id) DO NOTHING RETURNING id`.
@@ -114,16 +116,21 @@
 6. **Debounce state:**
    - `INSERT user_turn_state (user_id, process_after, burst_started_at) VALUES ($u, $now+DEBOUNCE, $now) ON CONFLICT DO UPDATE SET burst_started_at = COALESCE(old.burst_started_at, $now), process_after = LEAST(GREATEST(old.process_after, $now+DEBOUNCE), COALESCE(old.burst_started_at,$now)+MAX_DEBOUNCE)`.
    - CLAIM sets `burst_started_at = NULL`, so every burst gets its own 15 s cap.
-7. **Duplicates:** a duplicate delivery whose original row is still pending or processing re-triggers `after(kick)` as a free retry. Otherwise return 200.
+7. **Priority intents,** in the same transaction:
+   - a crisis-tagged row → intent `priority:<inbound_id>:crisis` with the fixed copy;
+   - a STOP row → intent `priority:<inbound_id>:stop`, guarded by `UPDATE users SET stop_confirmed_at=$now WHERE stop_confirmed_at IS NULL OR stop_confirmed_at < messaging_paused_at RETURNING`, so a pause episode gets exactly one confirmation.
+   - Writing them here, not in `kick`, means a kick that dies early can't lose them.
+8. **Duplicates:** a duplicate delivery whose original row is still pending or processing re-triggers `after(kick)` as a free retry. Otherwise return 200.
 
 **kick(user)** (in `after()`; also called by `/api/internal/kick` and the sweepers). It is idempotent. `me` is a random UUID per call, and the deadline is `D = getDeadline() ?? start+300 s`.
-1. **Priority path** (outside the lease, before any waiting):
-   - **Crisis-tagged rows:** send the fixed copy now.
-     - Emergency: call 911.
-     - Self-harm: call or text 988, plus 911 if in danger.
-     - ED: the care message with the helpline.
-   - **STOP-tagged rows:** send the single confirmation, guarded by `UPDATE users SET stop_confirmed_at=$now WHERE stop_confirmed_at IS NULL OR stop_confirmed_at < messaging_paused_at RETURNING`, so duplicate kicks can't send a second one.
-   - Priority intents use the key `priority:<inbound_id>`. A row is screened once, at ingest; re-driven kicks never re-screen, they only send unsent priority intents.
+1. **Priority path** (outside the lease, before any waiting). Send every unsent priority intent for this user, crisis intents first. The copy:
+   - emergency: call 911;
+   - self-harm: call or text 988, plus 911 if in danger;
+   - ED: the care message with the helpline;
+   - STOP: the confirmation.
+   - Each send goes through a conditional claim, `UPDATE outbound_messages SET status='sending' WHERE id=$id AND status='intent' RETURNING`, so concurrent kicks can't double-send.
+   - Priority intents are exempt from lease fencing.
+   - Rows are screened once, at ingest. Re-driven kicks never re-screen; they only send what is still unsent.
 2. **Triage during the debounce:** consented users, messages with text. Haiku 5.5 runs per message and stores only result fields plus `triage_status` (pending, done or failed) on the row.
 3. **Media prefetch:** consented users only, and only this message's media. Single-flight:
    - claim: `UPDATE media SET status='downloading', claimed_until=$now+60s, attempts=attempts+1 WHERE id=$id AND (status='pending' OR (status='downloading' AND claimed_until<$now)) AND attempts<3`;
@@ -136,7 +143,7 @@
    - **Fresh lease held by someone else** (expiry more than 25 s away): a live holder will see our message when it rechecks. Return.
    - **Lease close to expiry:** the holder missed heartbeats. Sleep until it expires, then retry, at most 3 times.
    - **Heartbeat:** RENEW every 15 s, fenced on `lease_owner=$me`. A failed renew aborts the turn through an `AbortSignal`.
-   - **Fencing:** every turn side-effect write (meals, supplements, profile, outbound intents) adds `AND EXISTS (lease_owner=$me AND lease_expires_at>$now)`. A stalled holder therefore can't commit after a takeover.
+   - **Fencing:** every turn side-effect write (meals, supplements, profile, reply intents) adds `AND EXISTS (lease_owner=$me AND lease_expires_at>$now)`. A stalled holder therefore can't commit after a takeover.
 5. **Holder loop:**
    - Read `process_after` and the pending state.
    - If `process_after > $now`, **sleep until then and re-read**. Never exit on an early wake; that was v1's stranding bug.
@@ -172,13 +179,16 @@
 
 ### 2.2 TurnRouter (one claimed burst; the order is a safety property)
 1. **Rows already handled by the priority path:**
-   - A crisis-tagged burst ends the turn: no onboarding prompt, no agent, no totals.
-   - A burst containing STOP: the other messages in it are marked `ignored`.
+   - **Crisis-tagged burst:**
+     - write `safety_events(kind, source=keyword)`;
+     - for consented users, apply the care state from step 5 (cooldown or ED window);
+     - then end the turn: no onboarding prompt, no agent, no totals.
+   - **Burst containing STOP:** non-command messages are marked `ignored`. Any commands allowed while paused (START, HELP, DELETE, MY DATA, BILLING) are processed in message order.
 2. **Commands** (tagged per message at ingest):
 
    | Command | Behaviour |
    |---|---|
-   | STOP family (STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, REVOKE, OPT OUT, OPTOUT, plus the opt-out phrases) | Handled at ingest and on the priority path. Revokes every proactive category. If the provider rejects the confirmation with `OPTED_OUT`, it counts as already confirmed. For an active subscriber (M7), the confirmation adds the plan's status and the `/billing` link (wording is a counsel item, §9 Q4). |
+   | STOP family (STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, REVOKE, OPT OUT, OPTOUT, plus the opt-out phrases) | Handled at ingest and on the priority path. Revokes every proactive category. If the provider rejects the confirmation with `OPTED_OUT`, it counts as already confirmed. For an active subscriber (M7), the confirmation adds the plan's status and the `/billing` link (wording is a counsel item, §9 Q4). If the provider blocks it, M7's fallback applies. |
    | START / UNSTOP | Resumes replies only. Each check-in category needs a fresh opt-in. |
    | HELP | Program name, support contact, how to opt out, how to cancel billing (listed separately), policy links, FDC attribution. |
    | DELETE → `YES DELETE` | See §2.6. |
@@ -186,10 +196,10 @@
    | SUBSCRIBE / BILLING | M7. |
 
    - **While paused:** START, HELP, DELETE (and its confirmation), MY DATA, BILLING and safety replies are processed and their replies attempted. Everything else is ignored.
-   - **Provider block:** Sendblue itself opts a number out on STOP and then rejects sends (`OPTED_OUT`). So for a paused user, state changes always happen (deletion, rights request, START), but replies may be undeliverable. They are recorded as `undeliverable`; see §2.6 for DELETE. M6 Step 0 confirms the actual behaviour.
+   - **Provider block:** Sendblue itself opts a number out on STOP and then rejects sends (`OPTED_OUT`). So for a paused user, state changes always happen (deletion, rights request, START), but replies may be undeliverable. They are recorded as `undeliverable`. See §2.6 for DELETE and M7 for billing. M6 Step 0 confirms the actual behaviour.
 3. **Pending prompts** (one state machine):
-   - The **age and consent prompts** stay outstanding until answered. A non-answer gets one re-prompt; after that the prompt is re-sent on the next message.
-   - **`YES DELETE`** binds within its 10-minute TTL. Any other message in between cancels it.
+   - The **age and consent prompts** stay outstanding until answered. Each non-answer gets the prompt again, at most once per 10 minutes.
+   - **`YES DELETE`** binds within 10 minutes of a DELETE, whether or not the prompt was delivered. Any other message in between cancels it.
    - **A check-in opt-in YES** binds only as the next message, within 24 h.
 4. **Onboarding (from M4)** uses deterministic copy from `policy_versions`, pre-split into bubbles of ≤300 characters and never passed through the LLM formatter. **Until M4,** simulator users are created as consented (dev-only, refused in production) so M1–M3 can be tried at all.
    1. **First message from an unknown number:** "AI coach, not a doctor" plus the neutral question "How old are you?". Only the derived 18+ boolean is stored.
@@ -325,7 +335,8 @@
 ### 2.6 DELETE, withdrawal and rights (SPEC Safety; MHMDA)
 1. **Prompt.** The DELETE prompt explains the scope: "This deletes your whole account — every meal, photo, supplement and your profile. To remove one meal, say 'remove my last meal'. Our texting and payment providers keep limited records as described at <CHD notice>. Reply YES DELETE within 10 minutes to confirm."
 2. **Confirmation.** It works while paused. In M6 the confirming message is verified by fetching it back from the provider.
-   - **Default fallback when the prompt can't be delivered** (provider `OPTED_OUT` after STOP): a DELETE from that number completes once the 10-minute window passes with no other message. A rights request and a receipt are recorded. Counsel confirms this default (§9 Q4).
+   - **When the prompt can't be delivered** (provider `OPTED_OUT` after STOP), the two-step flow is published in HELP and the CHD notice ("text DELETE, then YES DELETE"), and `YES DELETE` within 10 minutes of a DELETE is accepted whether or not the prompt was delivered. That keeps the SPEC's confirmation step.
+   - A bare DELETE that is never confirmed while sends are blocked is recorded as a `rights_requests` (delete) row, and fulfilled through the support channel within 45 days. Counsel reviews this (§9 Q4).
 3. **On confirmation, in order:**
    1. Cancel the Stripe subscription and delete the Customer (M7). On failure, copy the Stripe IDs into `pending_deletions` (no user FK) for a retrying job; the account wipe goes ahead.
    2. Delete the `users` row (cascades).
@@ -344,15 +355,15 @@
    - Turning a category off needs no confirmation. Everything defaults to off.
 2. **Schedule.** `proactive_schedule(user_id, kind, next_due_at)` is computed in code, applying DST and quiet hours. It is recomputed whenever preferences or the timezone change, and after each send.
 3. **Tick.** For each user with `next_due_at <= $now` (within a grace window):
-   1. **Pre-check** (read-only): the lease is free, no inbound is pending, the user hasn't texted in the last 10 min, they aren't paused or in a cooldown, the timezone is confirmed, and they aren't gated. If any fails, skip until the next tick; nothing is consumed.
+   1. **Pre-check** (read-only): the lease is free, no inbound is pending, the user hasn't texted in the last 10 min, they aren't paused or in a cooldown, `unanswered_proactive_count < PROACTIVE_UNANSWERED_PAUSE`, the timezone is confirmed, and they aren't gated. If any fails, skip until the next tick; nothing is consumed.
    2. **Claim**, in one DB-only transaction. If any step changes 0 rows, roll back.
       - `INSERT proactive_sends ON CONFLICT DO NOTHING`;
-      - a conditional increment of the user's **per-local-day** counter (`proactive_count_date`, `proactive_count < 2`), plus "no kind sent in the last 20 h" (this covers timezone changes);
+      - a conditional increment of the user's **per-local-day** counter (`proactive_count_date`, `proactive_count < 2`), with `unanswered_proactive_count < PROACTIVE_UNANSWERED_PAUSE` and no check-in **of the same kind** in the last 20 h (this covers timezone changes) in the same `WHERE`;
       - a conditional increment of `line_daily_counters` (< `GLOBAL_DAILY_CAP_PER_LINE`, on the provider's day).
    3. **Take the lease, compose, re-check pause, send once** (at-most-once).
    4. **After the send:**
       - on `sent`/`unknown`: increment `unanswered_proactive_count`;
-      - on a suppressed or blocked send: a compensating transaction deletes the claim and decrements the counters.
+      - if the lease wasn't acquired, the pause re-check hit, or the send came back `opted_out`, `failed` or `rate_limited`: a compensating transaction deletes the claim and decrements the counters, so the user keeps the slot.
    - Sends fan out with bounded concurrency, and claiming stops at `D-60 s`.
 4. **Content:**
    - **one bubble per check-in**, with numbers filled in from code templates;
@@ -479,7 +490,7 @@ interface ChannelAdapter {
 3. Add the code-owned bubbles (totals, safety copy).
 4. Fit into 3 bubbles of ≤300 characters by **merging, never dropping**; if it still doesn't fit, one "shorten" retry.
 5. Write the intents.
-6. Re-check pause right before each send.
+6. Re-check pause and existence right before each send. Kinds `priority`, `safety` and `command` are exempt from the pause check.
 
 **Stop reasons and errors:**
 - `refusal`: canned caring reply plus resources, and a `safety_event`.
@@ -529,7 +540,7 @@ interface ChannelAdapter {
 | `inbound_messages` | UQ(`provider`, `provider_message_id`), `user_id`, `to_line`, `text` (nullable), `keyword`, `crisis_kind`, `sent_at`, `received_at`, `status` (pending/processing/done/ignored/failed), `turn_id`, `pre_consent`, `pre_consent_media_count`, `triage_status` + result fields | 1 |
 | `media` | `user_id`, `inbound_message_id`, `meal_id`, `supplement_id`, `provider_url` (cleared after download), `status` (pending/downloading/stored/failed/purged), `claimed_until`, `attempts`, `storage_key`, `content_type`, `w`, `h`, `bytes`, `sha256`, `kind`, `summary`, `purge_after` | 1 |
 | `turns` | `user_id`, `status` (claimed/effects_committed/reply_written/done/failed), `mode` (agent/onboarding/command/care/gated/safety), `clock_at`, per-iteration latency and token usage (input/cache read/cache write/output), `stop_reason`, `error_code`. **No content.** | 1 |
-| `outbound_messages` | `user_id`, `turn_id`, `kind` (reply/proactive/command/onboarding/safety/priority), `proactive_kind`, `from_line`, `text`, `media_id`, `idempotency_key` UQ, `status` (intent/sent/unknown/suppressed/undeliverable/failed), `provider_message_id`, `error_code` | 1 |
+| `outbound_messages` | `user_id`, `turn_id`, `kind` (reply/proactive/command/onboarding/safety/priority), `proactive_kind`, `from_line`, `text`, `media_id`, `idempotency_key` UQ, `status` (intent/sending/sent/unknown/suppressed/undeliverable/failed), `provider_message_id`, `error_code` | 1 |
 | `simulator_events` | `user_id` FK, `type`, `payload` | 1 |
 | `dev_clock` | one row: offset for simulator time travel; ignored in production | 1/5 |
 | `fdc_foods` | `fdc_id` PK, `data_type`, `description` (GIN trigram + tsvector), `food_category`, `wweia_category`, `release`, `basis` (g/ml), `per100` jsonb, `energy_source`, `portions` jsonb, `includes_added_fat`, `includes_sauce`, `brand_owner`, `gtin`, `serving_size`, `serving_unit`, `source` (seed/api), `fetched_at` | 2 |
@@ -545,7 +556,7 @@ interface ChannelAdapter {
 | `policy_versions` | `kind` (privacy/chd_notice/consent_prompt/age_prompt/optin_prompt/…), `version`, `url`, `bubbles` (pre-split), `sha256`, `effective_at`, `requires_reconsent` | 4 |
 | `consent_events` | Append-only: `user_id`, `type` (age_18_plus/chd_collection/proactive:<kind>), `action`, `policy_version_ids`, `bubbles_sha256`, `outbound_provider_ids[]`, `delivery_status`, `inbound_provider_message_id`, `matched_keyword`, `verified_by_fetch`, `provider`, `service`, `app_version` | 4 |
 | `safety_events` | `user_id`, `kind` (emergency/self_harm/ed_high/ed_possible/refusal/minor), `source` (keyword/triage/signal), `delivered`, `turn_id`. **No text.** | 4 |
-| `suppressions` | `phone_hmac` PK, `reason` (minor; deleted/opted-out only if counsel approves, §9 Q4), `created_at` | 4 |
+| `suppressions` | `phone_hmac` PK, `reason` (minor; deleted/opted-out only if counsel approves, §9 Q4), `created_at`, `last_reply_at` | 4 |
 | `rights_requests` | `type` (access/delete), `user_id` (SET NULL), `received_at`, `due_at`, `extended_due_at`, `processors_notified` jsonb, `completed_at`, appeal fields | 4 |
 | `deletion_receipts` | `requested_at`, `completed_at`, `blobs_deleted`, `stripe_canceled`; no identifiers | 4 |
 | `pending_deletions` | Stripe customer/subscription IDs, `attempts`, `next_attempt_at`; no user FK | 7 |
@@ -757,12 +768,14 @@ Larger milestones have internal a/b checkpoints. These are commits, not stops.
   - Agent-led, skippable profile; `update_profile` with units; targets with guardrails (and the BMI rule once verified).
   - Timezone: ask, otherwise `DEFAULT_TIMEZONE`; re-dating rules on correction.
   - Haiku triage with `ensureTriage`, persisted `health_context`, fail-safe, care mode and cooldowns, computed ED signals, scoped opt-outs.
-- **Evals:** `npm run eval -- --suite safety` (synthetic labelled phrases). **A false negative on emergency, self-harm or high ED risk blocks the milestone.**
+- **Evals:** `npm run eval -- --suite safety` (synthetic labelled phrases, including false-positive traps like "I'm starving, what's for dinner?"). **A false negative on emergency, self-harm or high ED risk blocks the milestone.**
 - **Tests:**
   - consent determinism: no LLM path can write consent;
   - STOP and DELETE flows; minor decline-and-delete plus re-contact blocked;
   - guardrail clamps;
-  - crisis replies for pre-consent, paused and re-driven messages, exactly once;
+  - crisis replies for pre-consent, paused and re-driven messages (including a kick that dies before sending), exactly once, with a `safety_events` row and the care state applied;
+  - a message that is both STOP and crisis gets both replies, crisis first;
+  - [STOP, DELETE] and [STOP, START] bursts process the commands;
   - DELETE leaves zero rows and zero blobs.
 - **Try it:**
   - As +12015550101: "17" → decline; texting again → nothing new.
@@ -780,7 +793,7 @@ Larger milestones have internal a/b checkpoints. These are commits, not stops.
   - `metrics_daily`. (The sweep, drafts and retention jobs already run on the tick from M2a/M4a.)
   - `/admin`: aggregates only, Basic auth, `no-store`, rate-limited failed logins. It shows the send-to-receive ratio, DAU, photos per user per day, open rights-request deadlines, and average CPU ms per photo.
 - **Tests:**
-  - back-off; caps under overlapping ticks; skipped users keep their slot;
+  - back-off (no check-in at 2 unanswered); caps under overlapping ticks; skipped, blocked or failed sends keep the slot;
   - quiet hours; DST fall-back (Sunday 2026-11-01 is a weekly-recap day);
   - Sunday with every category on; STOP during a tick;
   - proactive consent determinism.
@@ -819,12 +832,14 @@ Larger milestones have internal a/b checkpoints. These are commits, not stops.
   - In-app trial (no card) starting at consent; `getAccess` (full / grace / gated) as a pure function.
   - SUBSCRIBE → `/pay/<token>`: creates or reuses a Checkout session, multi-use within its TTL. Pay pages carry the policy links.
   - BILLING → `/billing/<token>`; the cancel-plan flow; the STOP-with-active-plan line.
+  - **When the provider blocks sends to a paused subscriber:** use `setOptOut(false)` for one transactional reply, if M6 Step 0 shows that is allowed. Otherwise rely on Stripe's customer emails and portal login, which carry the manage and cancel link.
   - Stripe webhook: signature check, `event.id` dedupe, subscription re-fetch.
   - DELETE cancels the subscription and deletes the Customer (with `pending_deletions` on failure).
   - Fake BillingProvider for the simulator and evals. Only the user UUID goes to Stripe.
 - **Tests:**
   - access matrix; webhook signature (`generateTestHeaderString`); idempotency;
-  - a gated user's crisis text still gets care; a gated "stop texting me" gets no sales text.
+  - a gated user's crisis text still gets care; a gated "stop texting me" gets no sales text;
+  - a paused subscriber with the opted-out fake still has a cancel path.
 - **Try it:** time-travel past the trial → paywall (no price, no link) → SUBSCRIBE → fake checkout → access restored.
 
 ### 8.1 Eval harness (`npm run eval`)
@@ -878,7 +893,7 @@ Results go to `eval-results/<ts>.json` (gitignored).
 4. **Counsel items:**
    - keep an HMAC'd consent/opt-out suppression record after DELETE? (default: keep nothing except minors);
    - the Neon restore window (proposed 1 day);
-   - the DELETE fallback when the prompt can't be delivered (§2.6, default above);
+   - DELETE when the prompt can't be delivered: we accept `YES DELETE` anyway, and handle a bare unconfirmed DELETE as a 45-day rights request (§2.6);
    - sending crisis replies to STOPped users (default: yes, attempted);
    - the billing line in STOP confirmations for subscribers;
    - the paywall wording;
