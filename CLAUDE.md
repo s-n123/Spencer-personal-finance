@@ -33,7 +33,7 @@ An AI nutrition coach used entirely over iMessage: meal photos, menus, supplemen
 | `npm run test:pg` | node-postgres suite + race tests on a throwaway PG16 (or `TEST_DATABASE_URL`) |
 | `npm run db:generate -- --name <x>` | New migration. Never edit an applied migration |
 | `npm run db:migrate` / `db:check` / `db:reset` / `db:studio` | Migration tooling |
-| `npm run eval -- --suite meals\|menus\|labels\|text\|safety` | Runs fixtures through the agent via the simulator. Costs money and needs `ANTHROPIC_API_KEY` |
+| `npm run eval` (all suites) or `npm run eval -- --suite meals\|menus\|labels\|text\|safety` | Runs fixtures through the agent via the simulator. Costs money and needs `ANTHROPIC_API_KEY` |
 | `npm run fdc:seed` / `fdc:record` / `fdc:search -- "<q>"` | FDC seed import, owner-run fixture recording, CLI search |
 | `npm run cron:tick -- --at <ISO>` | Run the proactive/sweep tick at a simulated time (dev only) |
 | `npm run fixtures:synthetic` / `fixtures:strip` | Generate synthetic label and menu images; strip metadata from owner photos |
@@ -45,12 +45,13 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
   - The totals bubble is appended by code.
   - The number-source check rejects unit-bearing numbers in model text that didn't come from tool results or the context block.
 - **Deterministic paths:** consent, age gate, proactive opt-ins, STOP/START/HELP/DELETE/MY DATA, emergency and crisis replies. The LLM never decides consent.
-- **Router order:** commands → crisis screen → onboarding → triage/care → access gate → agent. Nothing suppresses a safety reply or an opt-out.
-- **Keywords are matched per inbound message at ingest,** never on a batched burst. STOP sets the pause inside the ingest transaction; OutboundSender re-checks pause before every single send.
-- **One turn per user at a time** via the DB lease (lease-first, heartbeat, fenced on a per-call UUID; never exit on an early wake). Proactive composition takes the same lease.
+- **Order:** per-message screen at ingest (keywords, crisis/ED/opt-out phrases → tags only) → priority path in kick (crisis copy, the one STOP confirmation; outside the lease and debounce) → TurnRouter: handled rows → commands → onboarding → triage/care → access gate → agent. Nothing suppresses a safety reply or an opt-out.
+- **Keywords and crisis phrases are matched per inbound message at ingest,** on the in-memory text, never on a batched burst. Re-driven kicks never re-screen. STOP sets the pause inside the ingest transaction; OutboundSender re-checks pause before every single send.
+- **One turn per user at a time** via the DB lease (lease-first, heartbeat, fenced on a per-call UUID; never exit on an early wake). Every turn side-effect write is fenced on still holding the lease. Proactive composition takes the same lease.
 - **Postgres is the only shared state.** Nothing per-request lives in module scope (Fluid runs many invocations per instance).
 - **Time-sensitive SQL takes `$now` from the injected `Clock`.** Never `now()` in comparisons; DB `now()` is only for `created_at` defaults.
 - **Provider-specific code stays in `src/server/channels/<provider>/`.**
+- **DB pool:** max 10 in production; in dev, max 4 as a `globalThis` singleton (HMR), below the PGlite server's 8 connections.
 - **Transactions are DB-only critical sections.** Never hold a transaction or checked-out client across an LLM, provider, blob or sleep await. Inside `db.transaction`, use `tx` only.
 - **Wrap fire-and-forget promises** with the catch helper in `src/server/safe.ts`.
 
@@ -63,7 +64,7 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
   - owner photo fixtures are gitignored (`fixtures/synthetic/` is committed);
   - provider payloads only through `scripts/capture-payload.ts` redaction;
   - `eval-results/` is gitignored.
-- **Pre-consent:** store no free text (only onboarding-grammar matches), no media, no provider URLs.
+- **Pre-consent (from M4):** store no free text (only commands and YES replies; age answers are stored as a tag), no media, no provider URLs. Until M4, simulator users are created as consented (dev-only).
 - **Health photos:** private storage only, EXIF stripped, never served at public URLs, never sent to `/admin`.
 - **`/admin` shows aggregates only.**
 - **Simulator:** hard-off when `VERCEL_ENV=production`; fictional numbers only.
@@ -73,7 +74,7 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
 - **Never send `temperature`, `top_p` or `top_k`** (400 on every model).
 - **`tool_choice: auto` only.** Sonnet 5.5 rejects `any`/`tool`, including on count_tokens.
 - **Strict tools** (`strict: true`, write tools only):
-  - no `minimum`/`maximum`/`minLength`/`pattern` in the emitted schema;
+  - unsupported in the emitted schema: `minimum`, `maximum`, `multipleOf`, `minLength`, `maxLength`, `minItems`>1/`maxItems`, recursive or external `$ref`; `pattern` only if simple and free of user data;
   - use the bound-free wire schema plus a separate Zod validation schema;
   - stay within ≤20 strict tools, ≤24 optional params and ≤16 union params (a test checks);
   - no user data in enum, const or pattern.

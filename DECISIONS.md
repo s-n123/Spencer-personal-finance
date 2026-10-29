@@ -20,12 +20,13 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
   - Owner photo fixtures are gitignored by default (`fixtures/synthetic/` is committed).
   - Provider payloads are committed only through `scripts/capture-payload.ts` redaction.
   - Only fictional `+1NPA55501XX` numbers appear in code, tests and docs.
-  - A test scans `test/` and `fixtures/` for real-looking numbers and provider media hosts.
+  - A test scans `src/test/`, `fixtures/` and `docs/` for real-looking numbers and provider media hosts.
   - `eval-results/` is gitignored.
   - · Reason: EXIF GPS, phone numbers, message bodies and live media URLs must not be published. · active
 - **D-004 · Milestones are the SPEC's 7 stop points. Larger milestones (M2, M4) have internal a/b checkpoints, which are commits, not stops.** · Respects the owner's review cadence while keeping commits small. · active
 - **D-005 · Step 0 of any integration milestone: re-read the live docs and mark every `[search]` fact the code relies on as verified. If a host is still blocked, stop and ask.** · SPEC requires reading current docs, and the research couldn't reach several sites. · active
 - **D-006 · CI on GitHub Actions runs `npm run check` plus the node-postgres and race suite against a Postgres service on every push.** · Catches drizzle's silent migration skip, driver type differences and races. · active
+- **D-007 · Until M4 turns on the consent gate, simulator users are created as consented (dev-only; refused when `VERCEL_ENV=production`).** · Without this, M1–M3 can't be tried at all; there are no real users before M6. · active
 
 ## Stack
 
@@ -42,10 +43,10 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
   - `db:check` asserts schema and migrations match and that journal timestamps increase.
   - · Reason: 0.45 is stable. Its migrator silently skips out-of-order migrations, so the checks are mandatory. · active
 - **D-016 · Local and test databases:**
-  - dev: `npm run dev` auto-starts a PGlite socket server on 127.0.0.1:54330 (8 connections, pg_trgm), or any Postgres via `DATABASE_URL`;
+  - dev: `npm run dev` auto-starts a PGlite socket server on 127.0.0.1:54330 (8 connections, pg_trgm; the dev pool is capped at 4 and kept as a `globalThis` singleton across HMR), or any Postgres via `DATABASE_URL`;
   - unit tests: in-process PGlite;
   - the node-postgres project plus race tests: real PG16 (`npm run test:pg` starts a throwaway cluster, or uses `TEST_DATABASE_URL`).
-  - · Reason: zero install for the owner. PGlite serializes everything (races are invisible there) and returns different raw types than pg, so the pg suite is required for milestone sign-off. A single PGlite connection resets any second client, and 5432 collides with local Postgres installs. · active
+  - · Reason: zero install for the owner. PGlite serializes everything (races are invisible there) and returns different raw types than pg, so the pg suite is required for milestone sign-off. The research suggested `-m 1`, but the reviewer verified that a single PGlite connection resets any second client (migrate, seed, eval), so we override it. Port 5432 collides with local Postgres installs. · active
 - **D-017 · Zod v4 for validation. Each tool has a bound-free wire schema for `input_schema` and a separate validation schema with bounds.** · Strict tools reject `minimum`, `maximum` and similar keywords, which Zod emits. A unit test enforces the keyword allowlist and the strict budgets. · active
 - **D-018 · Anthropic TypeScript SDK 1.3.0, plain `messages.create` tool loop (no tool runner, no Agent SDK).** · Per SPEC. · active
 - **D-019 · Columns use `text` + CHECK instead of pgEnum. Nutrient values are `double precision` or integer, never `numeric`. Aggregates use `sqlNumber()` (`.mapWith(Number)`). App code is typed against the base `PgDatabase`. Columns whose keys have a digit after a capital letter get explicit SQL names.** · Value sets change each milestone. pg returns numeric and bigint aggregates as strings while PGlite returns numbers. `casing: snake_case` turns `phoneE164` into `phone_e_164`. · active
@@ -57,7 +58,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-031 · Never use forced `tool_choice` on Sonnet 5.5; use `auto` plus `strict: true` on the write tools only (`log_meal`, `edit_or_delete_meal`, `save_supplement`).** · Sonnet 5.5 rejects `any`/`tool`. Strict budgets are ≤20 tools, ≤24 optional params and ≤16 unions, and the first use of a schema pays grammar-compile latency. · active
 - **D-032 · Never replay earlier turns' assistant, thinking or tool blocks. History is alternating text-only user/assistant messages, with code-written photo summaries and `[totals]` in place of past totals lines.** · Avoids preserved-thinking 400s, keeps the cache prefix stable, and stops the model copying stale numbers. · active
 - **D-033 · Caching: 1 h `cache_control` on the last tool and on the static system prompt, plus an automatic 5-minute breakpoint on each request.** · The shared prefix is reused across users at sparse traffic, and loop iterations reuse the turn prefix. This cuts the estimated photo-turn cost from ~$0.065 to ~$0.04. · active
-- **D-034 · `MODEL_MAIN_EFFORT` defaults to `medium`, constant within a turn, tuned by eval sweeps (low, medium, `between_tools`). `max_tokens` 8000 for Sonnet, 1024 for Haiku.** · Latency matters for texting. Changing effort mid-turn invalidates the cache. The SDK refuses non-streaming calls above about 21k `max_tokens`. · active
+- **D-034 · `MODEL_MAIN_EFFORT` defaults to `medium`, constant within a turn, tuned by eval sweeps (effort low/medium, plus thinking `between_tools`). `max_tokens` 8000 for Sonnet, 1024 for Haiku.** · Latency matters for texting. Changing effort mid-turn invalidates the cache. The SDK refuses non-streaming calls above about 21k `max_tokens`. · active
 - **D-035 · One invocation deadline `D` drives every timeout.**
   - Each Anthropic call gets an `AbortSignal`, `timeout = min(60 s, remaining − 45 s)` and `maxRetries` of 1 only when more than 150 s remain.
   - 30 s is reserved for sends.
@@ -95,6 +96,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-046 · Mid-turn messages become the next turn under the same lease. Exception: if no side effect or intent exists yet, the model call is aborted and everything is re-claimed as one turn.** · Keeps the tool loop append-only while fixing late-arriving captions. · active
 - **D-047 · Group chats, tapbacks, outbound echoes and non-E.164 handles (Apple ID emails) are acknowledged and never persisted; only counts are kept.** · MVP scope; avoids storing third parties' messages. · active
 - **D-048 · No transaction or checked-out client spans an LLM, provider, blob or sleep await. Every fire-and-forget promise goes through a catch-and-log helper.** · Pool starvation and unhandled rejections affect every invocation on a Fluid instance. · active
+- **D-049 · Every turn side-effect write (meals, supplements, profile, outbound intents) is fenced on still holding the lease. `ensureMedia` and `ensureTriage` wait briefly for in-flight work, then do it inline under the lease.** · A stalled holder can't commit after a takeover, and turns never run without their photo or triage result. · active
 
 ## Media
 
@@ -120,41 +122,45 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-067 · At most one open draft per user, excluded from totals. It auto-commits at the point estimate on a new meal, when the next turn doesn't address it, or after 2 h.** · Defined lifecycle; no orphan drafts. · active
 - **D-068 · The totals bubble is appended by code. A number-source check rejects any unit-bearing number in model text that didn't come from tool results or context (one corrective retry, then strip).** · SPEC: arithmetic never happens in the model, and the model shouldn't be the one printing totals. · active
 - **D-069 · Default targets before a profile exists: 2,000 kcal and 100 g protein. Suggestions are fit against `max(remaining, MIN_MEAL_KCAL=400)` and never suggest skipping.** · M2 needs targets before M4. The fit rule enforces the "never praise restriction" spirit. · active
+- **D-069a · Text questions and dinner suggestions use `evaluate_options` (from M2) or quantity-aware `search_foods`, so answers like "protein in 3 eggs" never need model arithmetic. Profile questions after consent are asked one at a time and are all skippable; skipping never blocks logging.** · SPEC: all arithmetic in code; everything in onboarding is skippable. · active
 
 ## Supplements
 
 - **D-070 · The UL table is versioned TypeScript data. Each row has `source_url`, the sheet's updated date, `retrieved_at` and `verified: true`; only rows verified against the live NIH ODS page are included.** · Reviewable diffs. SPEC forbids values from memory. A nutrient with no verified row gets "no verified upper limit on file". · active
 - **D-071 · The folic-acid UL is checked in mcg of folic acid, never DFE.** 5-MTHF counts as "indeterminate". Only preformed retinol counts for vitamin A. Vitamin E IU uses the synthetic factor when the form is unknown. Label amounts are treated as elemental (21 CFR 101.36). · Avoids false alarms on standard prenatals and false negatives on mineral salts. · active
 - **D-072 · Aggregation reports both the average daily dose and the max single-day dose. Duplicates are keyed on `nutrient_key`, or else the normalized ingredient name.** · Weekly megadoses and unmapped ingredients (caffeine, melatonin) are caught. · active
-- **D-073 · Adult (19+) ULs apply to all users, including 18-year-olds.** · Simpler; users are 18+, and the 14–18 band differs only slightly. · review
+- **D-073 · Adult (19+) ULs apply to all users, including 18-year-olds.** · Simpler, and users are 18+. The 14–18 band has lower ULs for some nutrients; the exact values are re-checked on ODS in M3, and that band can be applied if a user gives an age of 18. · review
 
 ## Safety, consent and messaging
 
 - **D-080 · Consent, age, proactive opt-ins, STOP/START/HELP/DELETE/MY DATA and the emergency and crisis replies are deterministic code paths. The LLM never decides consent.** · MHMDA "clear affirmative act"; WA private right of action; TCPA. · active
-- **D-081 · Router order: per-message commands → per-message crisis screen (keyword, before the debounce, outside the lease, every user) → onboarding → triage/care → access gate → agent. No onboarding, billing or debounce state can suppress a safety reply or an opt-out.** · Emergency, ED and opt-out handling must reach gated and pre-consent users too. · active
-- **D-082 · Keywords are matched per inbound message at ingest, never on a batched burst. STOP sets the pause inside the ingest transaction, and OutboundSender re-checks pause right before every individual send.** · Batching would swallow STOP; in-flight replies and check-ins would go out after STOP. · active
+- **D-081 · Order: per-message screen at ingest (keywords; crisis, ED and opt-out phrases; tags only) → priority path in kick (crisis copy and the one STOP confirmation, outside the lease and debounce) → TurnRouter: handled rows → commands → onboarding → triage/care → access gate → agent. No onboarding, billing or debounce state can suppress a safety reply or an opt-out.** · Emergency, ED and opt-out handling must reach gated and pre-consent users too. · active
+- **D-082 · Keywords and crisis, ED and opt-out phrases are matched per inbound message at ingest, on the in-memory text, never on a batched burst. Re-driven kicks never re-screen. STOP sets the pause inside the ingest transaction, and OutboundSender re-checks pause right before every individual send.** · Batching would swallow STOP; in-flight replies and check-ins would go out after STOP. · active
 - **D-083 · STOP revokes every proactive category and sends exactly one confirmation; a provider `OPTED_OUT` on that confirmation counts as already confirmed. START resumes replies only; each check-in category needs a fresh opt-in. CANCEL stays in the STOP family.** · FCC/CTIA. Stricter than the per-category option in FCC 26-67. · active
 - **D-084 · Natural-language opt-outs are classified with a scope (all, proactive_all, proactive:<kind>). "All" = STOP; scoped ones toggle a category; ambiguous ones get one confirming question.** · FCC: revocation by any reasonable means. Avoids over-pausing on "stop the morning texts". · active
-- **D-085 · Age is asked neutrally ("How old are you?"), and only the 18+ boolean is stored. Under 18: decline, delete everything, keep an HMAC(phone) suppression row; permanent, no re-ask.** · Neutral age screen; COPPA caution. · active
+- **D-085 · Age is asked neutrally ("How old are you?"). The age answer is stored as NULL text plus `keyword='age_answer'`, and only the 18+ boolean is kept. Birth year may be asked later, optionally, for targets. Under 18: decline, delete everything, keep an HMAC(phone) suppression row that ingest checks before creating a user; permanent, no re-ask.** · Neutral age screen; COPPA caution. · active
 - **D-086 · Before consent, text is stored only if the whole message matches the onboarding grammar; no media rows or URLs are stored, and photos are discarded with a "send it again after YES" reply.** · MHMDA requires consent before collection. (Supersedes v1's "store then null".) · active
 - **D-087 · Consent copy is stored pre-split in `policy_versions`. The consent event hashes exactly the bubbles sent and stores all of their outbound IDs and delivery status. Accepted replies: YES, Y, AGREE or I AGREE (whole message). In M6 the YES is verified by fetching it back from the provider.** · The record must prove what the user actually saw. Sendblue's webhook secret is static. · active
 - **D-088 · Withdrawal of consent = DELETE. MY DATA records a rights request with a 45-day clock (manual fulfillment for the MVP).** · MHMDA access and deletion rights; simple, true consent copy. · active
-- **D-089 · DELETE is confirmed with "YES DELETE" within 10 minutes, and works while paused.**
+- **D-089 · DELETE is confirmed with "YES DELETE" within 10 minutes (an intervening message cancels it), and works while paused.**
   - The prompt states the scope (whole account vs one meal) and the provider-record limits.
-  - Order: cancel and delete in Stripe (retry job on failure) → delete the users row → delete blobs by prefix → write the receipt.
-  - · Reason: distinct from consent YES and from "delete that meal". FTC §5 accuracy. · active
+  - Order: cancel and delete in Stripe (on failure, the IDs go to `pending_deletions` for retry and the wipe proceeds) → delete the users row → delete blobs by prefix → write the receipt → send the final message directly through the adapter (no stored row).
+  - If the prompt can't be delivered (provider `OPTED_OUT`), the deletion completes once 10 minutes pass with no other message.
+  - · Reason: distinct from consent YES and from "delete that meal". FTC §5 accuracy. · active (fallback: counsel)
 - **D-090 · Medical context is kept as coarse persistent booleans (rx meds, pregnant/nursing, condition), never free text. Conditions never change targets. Supplement results carry a code-computed `advise_pharmacist`.** · SPEC pharmacist rule across turns; FDA general-wellness boundary. · active
-- **D-091 · Triage failure (timeout, refusal, parse error) fails safe: numbers are suppressed and resources appended, never the plain agent. A long care cooldown needs a keyword hit or a second "high" within 7 days. Exiting care mode needs an explicit re-opt-in.** · Safety without one-off false positives locking a user out. · active
-- **D-092 · ED guardrail defaults (config): kcal floor 1,200 female / 1,500 male / 1,500 unspecified; max weekly loss min(0.9 kg, 1% of body weight) with deficit ≤1,000 kcal/day; cooldown 14 d; "possible" window 14 d; below-floor streak 3 d; the underweight-BMI rule waits until the cut-off is verified from CDC/NIH.** · Commonly cited heuristics; SPEC asks for owner review. · review
+- **D-091 · Triage failure (timeout, refusal, parse error) fails safe: numbers are suppressed and resources appended, never the plain agent. Only a genuine Haiku failure counts; a still-pending triage is first awaited or run inline (`ensureTriage`). A long care cooldown (14 days) needs corroboration: a keyword hit, a computed signal, or a second "high" within 7 days. A single "high" gets a 3-day short cooldown. "Possible" suppresses totals for that turn; only a corroborated "possible" starts the 14-day window. Exiting a cooldown needs an explicit re-opt-in.** · Safety without one-off false positives locking a user out. · active
+- **D-092 · ED guardrail defaults (config): kcal floor 1,200 female / 1,500 male / 1,500 unspecified; max weekly loss min(0.9 kg, 1% of body weight) with deficit ≤1,000 kcal/day; cooldown 14 d (short cooldown 3 d); "possible" window 14 d; below-floor streak 3 d; the underweight-BMI rule waits until the cut-off is verified from CDC/NIH.** · Commonly cited heuristics; SPEC asks for owner review. · review
 - **D-093 · The helpline is held in config with `verified_at`: National Alliance for Eating Disorders 1-866-662-1235 (sources also show 622), plus 988 and "text ALLIANCE to 741741". Re-verified before M4 ships.** · A wrong digit is a safety defect. · active
 - **D-094 · Quiet hours default to 21:00–08:00 local, per SPEC.** Some state laws (FL, OK, WA; search-only) use 8 pm for solicitations; our check-ins are opt-in and informational. · Kept the SPEC default; flagged. · review
 - **D-095 · Proactive check-ins:**
-  - opt-in per category via a deterministic YES prompt, which also confirms the timezone; default off;
-  - one bubble each; claimed before composing, with atomic caps and back-off counters; at-most-once;
-  - priority weekly > morning > evening > supplement; supplement reminders fold into the morning or evening message;
+  - opt-in per category via a deterministic YES prompt (next message, within 24 h), which also confirms the timezone; default off;
+  - one bubble each;
+  - order: read-only pre-check (lease free, no pending or recent inbound) → atomic claim (per-local-day counter < 2, no kind repeated within 20 h, line counter) → lease → send once;
+  - `unanswered_proactive_count` is incremented only after a `sent`/`unknown` result; skipped or blocked sends are compensated;
+  - priority weekly > morning > evening > supplement; a supplement reminder folds into the morning or evening message when due together, and is otherwise sent alone;
   - never sent to gated users, users in cooldown, or users without a confirmed timezone;
   - never contain pricing or links.
-  - · Reason: TCPA prior express consent. The reviewer's experiment showed count-then-send caps are exceeded under overlapping ticks. · active
+  - · Reason: TCPA prior express consent. The reviewer's experiment showed count-then-send caps are exceeded under overlapping ticks. The per-local-day counter matches SPEC's "per user per day"; a single counter column cannot represent a rolling 24 h window. · active
 - **D-096 · `GLOBAL_DAILY_CAP_PER_LINE=150`, counted on the provider's day.** · Sendblue's AI Agent plan allows 200 follow-up contacts per line per day (reset 3 AM ET). · review
 - **D-097 · Timezone resolution: the user's stated timezone, then the simulator's browser timezone, then `DEFAULT_TIMEZONE`. No area-code inference. If a guessed timezone is corrected, meals are re-dated (never days before today when the earlier value was user-set). `meals` stores `local_date` and `tz`.** · libphonenumber-js ships no timezone data, and area codes are weak signals for mobile numbers. · active
 - **D-098 · Retention: message text 90 days; photos 30 days; users who never consented deleted after 30 days.** · Data minimization; MHMDA and FTC retention expectations. · review
@@ -164,7 +170,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 
 - **D-100 · The cron endpoint is idempotent and catch-up based, so any trigger works (Vercel Pro `*/15`, GitHub Actions, manual). The Hobby daily cron is not relied on for recovery; the opportunistic sweep and handoff handle that.** · The owner's account is Hobby (daily cron, non-commercial only). · review
 - **D-101 · `/admin`: app-level HTTP Basic auth (`ADMIN_USER`/`ADMIN_PASSWORD`, high-entropy and validated, timing-safe), aggregates only (no phone numbers, text, photos or per-user drilldown), `Cache-Control: no-store`, rate-limited failed logins. Metrics come from a non-identifying `metrics_daily` table plus today's live counts. "Receive" means inbound turns.** · Vercel Password Protection isn't on Hobby. Least privilege. Purges must not rewrite history. · active
-- **D-102 · The simulator is hard-off when `VERCEL_ENV=production`, whatever the flag says. It accepts only fictional `+1NPA55501XX` numbers, namespaces users by provider, and needs admin auth on previews.** · A misconfigured env must not expose real users' threads. · active
+- **D-102 · The simulator is hard-off when `VERCEL_ENV=production`, whatever the flag says. It accepts only fictional `+1NPA55501XX` numbers and needs admin auth on previews. Users are unique by phone across providers, so a provider switch keeps them.** · A misconfigured env must not expose real users' threads. · active
 - **D-103 · Errors are sanitized centrally (a wrapper on every route and `after()` task, plus `onRequestError`): only name, SQLSTATE, constraint and table are logged. A CI canary test enforces it.** · `DrizzleQueryError.message` embeds bound parameters and pg errors include "Failing row contains (…)". · active
 - **D-104 · No analytics, pixels or third-party scripts on any page, including the pay pages.** · SPEC; FTC health-data enforcement history. · active
 - **D-105 · Launch gate (end of M6): the Sendblue line stays limited to the owner's test numbers until processor DPAs/terms, live counsel-reviewed policy and CHD notice URLs, an HBNR breach runbook and an Anthropic retention position exist.** · MHMDA processor contracts; FTC HBNR readiness. · review
