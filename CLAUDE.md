@@ -92,7 +92,8 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
   - always `--name`; never edit an applied migration;
   - journal `when` values must increase (after a rebase, delete and regenerate your migration);
   - new NOT NULL columns need a default or a backfill;
-  - no `push` except against a throwaway DB.
+  - no `push` except against a throwaway DB;
+  - drizzle-kit needs a relative `out` path and can exit 0 after an error, so `db:check` parses its output.
 - **Types:**
   - `text` + CHECK, not pgEnum;
   - nutrients are `double precision` or integer, never `numeric`;
@@ -113,7 +114,11 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
   - `after()` throws outside a request scope; call background work through the Runner interface (tests use `InlineRunner`);
   - `maxDuration = 300` on the turn routes (Hobby maximum).
 - **Webhooks:** keep webhook routes out of the proxy matcher; read the raw body (`await req.text()`) before parsing, for signature checks.
-- **Request bodies:** max 4.5 MB on Vercel; the simulator downscales client-side.
+- **Request bodies:**
+  - max 4.5 MB on Vercel; the simulator downscales client-side;
+  - with `proxy.ts` present, Next buffers bodies only up to 10 MB and silently truncates the rest (the simulator caps posts at 9.5 MB).
+- **No CSRF protection in route handlers.** State-changing dev routes must call `isCrossSiteRequest()`.
+- **`next dev` serves client bundles to `localhost` only** unless the host is in `allowedDevOrigins` (127.0.0.1 is). Otherwise the page renders but never hydrates.
 - **Docs:** bundled under `node_modules/next/dist/docs`.
 
 ## Tests
