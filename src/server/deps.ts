@@ -2,6 +2,7 @@ import type { LlmClient } from "@/server/agent/types";
 import type { AdapterRegistry } from "@/server/channels/types";
 import type { Db } from "@/server/db/types";
 import type { MediaStorage } from "@/server/media/storage/types";
+import type { PipelineHandlers } from "@/server/pipeline/contracts";
 import type { Runner } from "@/server/pipeline/runner";
 import type { Clock, Sleeper } from "@/server/time";
 
@@ -20,6 +21,11 @@ export interface Deps {
   adapters: AdapterRegistry;
   /** Model IDs from env (MODEL_MAIN / MODEL_FAST). */
   models: { main: string; fast: string; mainEffort: "low" | "medium" | "high" };
-  /** Base URL for self-handoff (/api/internal/kick); null disables HTTP handoff (tests, scripts). */
+  /**
+   * Continues a user's processing in a fresh invocation (POST /api/internal/kick). Null in tests
+   * and scripts, where the pipeline re-schedules the kick on `runner` instead.
+   */
   handoff: ((userId: string) => Promise<void>) | null;
+  /** Media and agent entry points the pipeline calls (wired in wiring.ts, stubbed in tests). */
+  pipeline: PipelineHandlers;
 }
