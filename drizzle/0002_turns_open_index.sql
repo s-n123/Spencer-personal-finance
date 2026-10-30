@@ -1,0 +1,1 @@
+CREATE INDEX "turns_open_user_id_idx" ON "turns" USING btree ("user_id","created_at") WHERE "turns"."status" in ('claimed', 'effects_committed', 'reply_written');

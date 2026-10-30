@@ -63,6 +63,11 @@ export interface ChannelAdapter {
   /** Parses a verified webhook body into normalized events. Never throws on unknown shapes. */
   parse(rawBody: string, headers: Headers): NormalizedEvent[];
   fetchMedia(url: string, signal: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string | null }>;
+  /**
+   * Called once a media row no longer needs its source (stored, or failed for good), so an
+   * adapter that staged the original can delete it. Best-effort; provider-hosted media needs none.
+   */
+  releaseMedia?(url: string): Promise<void>;
   sendText(from: string | null, to: string, text: string, opts: SendOptions): Promise<SendResult>;
   sendImage?(
     from: string | null,

@@ -15,9 +15,19 @@ const optionalUrl = z
   .transform((v) => (v ? v : undefined))
   .pipe(z.url().optional());
 
+// Empty counts as unset; when set, a shared secret must be long enough to resist guessing.
+const optionalSecret = z
+  .string()
+  .optional()
+  .transform((v) => (v ? v : undefined))
+  .pipe(z.string().min(32).optional());
+
 export const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   VERCEL_ENV: z.enum(["development", "preview", "production"]).optional(),
+  // Set by Vercel when Protection Bypass for Automation is on; lets self-handoff reach a
+  // protected preview deployment.
+  VERCEL_AUTOMATION_BYPASS_SECRET: z.string().optional(),
 
   // Anthropic
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -44,7 +54,8 @@ export const envSchema = z.object({
   // App wiring
   DEFAULT_TIMEZONE: z.string().default("America/New_York"),
   APP_BASE_URL: optionalUrl,
-  INTERNAL_KICK_SECRET: z.string().optional(),
+  // The only authentication on /api/internal/kick: at least 32 characters when set.
+  INTERNAL_KICK_SECRET: optionalSecret,
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
@@ -84,6 +95,9 @@ function assertProductionInvariants(env: Env): void {
     }
     if (env.LOG_LEVEL === "debug") {
       throw new Error("LOG_LEVEL=debug is not allowed in production");
+    }
+    if (env.LLM_PROVIDER === "fake") {
+      throw new Error("LLM_PROVIDER=fake is not allowed in production");
     }
     if (process.env.ANTHROPIC_LOG === "debug") {
       throw new Error("ANTHROPIC_LOG=debug is not allowed in production");

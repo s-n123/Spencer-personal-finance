@@ -695,7 +695,7 @@ Larger milestones have internal a/b checkpoints. These are commits, not stops.
   - Next.js scaffold, CI, lazy env plus the `.env.example` test, `npm run dev` with an auto-started PGlite server, Drizzle with checked migrations, core tables.
   - `log.ts` allowlist, `sanitizeError` with a canary test, the fire-and-forget catcher.
   - The simulator and its guards (users created as consented until M4).
-  - Pipeline: ingest with the per-message screen (keyword tags, crisis tags) and dedupe; `kick` with the priority path, heartbeat lease, fenced writes, claim, release-recheck, opportunistic sweep and handoff (all with `DEBOUNCE_MS=0`); outbound intents.
+  - Pipeline: ingest with the per-message screen (keyword tags, crisis tags) and dedupe; `kick` with the priority path, heartbeat lease, fenced writes, claim, release-recheck, opportunistic sweep and handoff; outbound intents. The 4 s debounce with its per-burst 15 s cap was pulled forward from M2a (D-121).
   - Media: the single-flight pipeline (HEIC worker, EXIF strip, `resizedSize` port).
   - Agent: a minimal Sonnet loop with the full static system prompt (style and safety rules) that describes any photo in plain bubbles; the formatter.
 - **Tests:**
@@ -712,7 +712,7 @@ Larger milestones have internal a/b checkpoints. These are commits, not stops.
 
 **M2: Meal logging, FDC grounding, day summary, clarifications, turn batching**
 - **M2a: batching and the FDC data layer.**
-  - 4 s debounce with a per-burst 15 s cap; the merge rule; turn clock; stale-turn recovery that knows about intents and side effects.
+  - The merge rule; turn clock; stale-turn recovery that knows about tool side effects (the 4 s debounce and 15 s cap shipped in M1, D-121).
   - Cron tick with the sweep and **draft auto-commit**.
   - FDC client and normalizer (handles spec drift and HTML error bodies).
   - `fdc:seed` importer for FNDDS + SR Legacy + Foundation, including the FNDDS added-fat and sauce flags.

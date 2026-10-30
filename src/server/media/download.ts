@@ -147,6 +147,7 @@ async function processClaim(deps: Deps, claim: Claim, signal: AbortSignal): Prom
       await discardUnclaimedBlob(deps, claim);
       return;
     }
+    await releaseSource(deps, claim);
     log.info("media.stored", {
       mediaId: claim.id,
       userId: claim.userId,
@@ -172,6 +173,16 @@ async function discardUnclaimedBlob(deps: Deps, claim: Claim): Promise<void> {
   if (row && (row.status === "stored" || row.status === "downloading" || row.status === "pending")) return;
   await deleteBlob(deps, claim.userId, claim.id);
   log.info("media.store.discarded", { mediaId: claim.id, userId: claim.userId, status: row?.status ?? "gone" });
+}
+
+/** Lets the adapter drop a staged original once nothing will download it again. */
+async function releaseSource(deps: Deps, claim: Claim): Promise<void> {
+  if (!claim.providerUrl) return;
+  try {
+    await adapterFor(deps, claim.provider).releaseMedia?.(claim.providerUrl);
+  } catch (err) {
+    logError("media.source.release_failed", err, { mediaId: claim.id, userId: claim.userId });
+  }
 }
 
 async function deleteBlob(deps: Deps, userId: string, mediaId: string): Promise<void> {
@@ -217,7 +228,10 @@ async function releaseFailed(deps: Deps, claim: Claim, err: unknown, aborted: bo
     .where(and(eq(media.id, claim.id), eq(media.status, "downloading"), eq(media.attempts, claim.attempts)))
     .returning({ status: media.status });
   // A claimer that lost its claim may already have written the deterministic key.
-  if (row?.status === "failed") await deleteBlob(deps, claim.userId, claim.id);
+  if (row?.status === "failed") {
+    await deleteBlob(deps, claim.userId, claim.id);
+    await releaseSource(deps, claim);
+  }
   log.warn("media.download.failed", {
     mediaId: claim.id,
     userId: claim.userId,

@@ -17,6 +17,6 @@ export const onRequestError: Instrumentation.onRequestError = async (err, reques
   logError("request.error", err, {
     route: context.routePath,
     kind: context.routeType,
-    phase: request.method,
+    method: request.method,
   });
 };

@@ -53,6 +53,15 @@ describe("SimulatorAdapter.fetchMedia", () => {
     await expect(adapter.fetchMedia(url, live())).rejects.toMatchObject({ errorCode: "sim_media_bad_url" });
   });
 
+  it("releaseMedia deletes only the staged original it names", async () => {
+    const [a, b] = [randomUUID(), randomUUID()];
+    await storage.put(simInboxKey(a), new Uint8Array([1]), SIM_INBOX_CONTENT_TYPE);
+    await storage.put(simInboxKey(b), new Uint8Array([2]), SIM_INBOX_CONTENT_TYPE);
+    await adapter.releaseMedia(simInboxUrl(a));
+    await adapter.releaseMedia("sim-inbox:../../etc/passwd");
+    expect([...storage.objects.keys()]).toEqual([simInboxKey(b)]);
+  });
+
   it("reports a missing upload without echoing the key", async () => {
     const err = await adapter.fetchMedia(simInboxUrl(randomUUID()), live()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppError);

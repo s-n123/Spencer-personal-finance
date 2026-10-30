@@ -58,6 +58,12 @@ export class SimulatorAdapter implements ChannelAdapter {
     return { bytes: obj.bytes, contentType: obj.contentType === SIM_INBOX_CONTENT_TYPE ? null : obj.contentType };
   }
 
+  /** The staged original still carries EXIF/GPS; only the pipeline's stripped JPEG is kept. */
+  async releaseMedia(url: string): Promise<void> {
+    const match = SIM_URL.exec(url);
+    if (match) await this.storage.delete(simInboxKey(match[1]));
+  }
+
   async sendText(_from: string | null, _to: string, _text: string, opts: SendOptions): Promise<SendResult> {
     opts.signal.throwIfAborted();
     return { status: "sent", providerMessageId: randomUUID() };

@@ -524,6 +524,24 @@ describe("STOP and START", () => {
     expect(replies.map((o) => o.status)).toEqual(["suppressed", "suppressed"]);
   });
 
+  it("STOP arriving while a refused turn's model call runs suppresses the refusal copy too", async () => {
+    deps.pipeline = recordingHandlers({
+      runAgent: async (_d, input) => {
+        agentCalls.push(input);
+        await handleInboundEvents(deps, [message("STOP")]);
+        return { ...agentReply(["refusal copy"]), mode: "safety", stopReason: "refusal" };
+      },
+    });
+    await send(message("hi"));
+    await runner.flush();
+    expect(deps.adapter.textsTo(PHONE)).toEqual([STOP_CONFIRMATION]);
+    const u = await userByPhone();
+    const replies = (await outbound(u.id)).filter((o) => o.turnId !== null && o.kind !== "priority");
+    expect(replies.map((o) => [o.kind, o.status])).toEqual([["reply", "suppressed"]]);
+    const refusedTurn = (await deps.db.select().from(turns)).find((x) => x.stopReason === "refusal");
+    expect(refusedTurn?.mode).toBe("safety");
+  });
+
   it("STOP arriving between two bubbles suppresses the unsent one", async () => {
     deps.pipeline = recordingHandlers({ runAgent: async () => agentReply(["one", "two"]) });
     let stopped = false;

@@ -146,6 +146,8 @@ describe("prefetchMedia", () => {
     expect(r.bytes).toBe(blob?.bytes.byteLength);
     expect(r.sha256).toBe(createHash("sha256").update(blob!.bytes).digest("hex"));
     expect(await exifr.gps(Buffer.from(blob!.bytes))).toBeUndefined();
+    // The adapter may now drop its staged original (the simulator's still has EXIF).
+    expect(deps.adapter.released).toEqual([m.url]);
   });
 
   it("downloads once when two prefetches race for the same row", async () => {
@@ -187,8 +189,10 @@ describe("prefetchMedia", () => {
     });
     await prefetchMedia(deps, [m.id], signal());
     expect(await row(m.id)).toMatchObject({ status: "pending", attempts: 2 });
-    // A pending row keeps its URL for the retry; a failed one never needs it again.
+    // A pending row keeps its URL (and the adapter its source) for the retry; a failed one never
+    // needs either again.
     expect((await row(m.id)).providerUrl).toBe(m.url);
+    expect(deps.adapter.released).toEqual([]);
     await prefetchMedia(deps, [m.id], signal());
     expect(await row(m.id)).toMatchObject({
       status: "failed",
@@ -199,6 +203,7 @@ describe("prefetchMedia", () => {
     await prefetchMedia(deps, [m.id], signal());
     expect(spy).toHaveBeenCalledTimes(3);
     expect(deps.storage.objects.size).toBe(0);
+    expect(deps.adapter.released).toEqual([m.url]);
   });
 
   it("fails permanently on input no retry can fix", async () => {

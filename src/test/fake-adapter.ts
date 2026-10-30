@@ -23,6 +23,8 @@ export class FakeAdapter implements ChannelAdapter {
   readonly sent: SentMessage[] = [];
   readonly typing: string[] = [];
   readonly media = new Map<string, { bytes: Uint8Array; contentType: string | null }>();
+  /** URLs passed to releaseMedia, in order. */
+  readonly released: string[] = [];
   /** Numbers whose sends return opted_out (simulates Sendblue blocking after STOP). */
   readonly optedOut = new Set<string>();
   /** Next N sends fail with this status. */
@@ -46,6 +48,10 @@ export class FakeAdapter implements ChannelAdapter {
     const item = this.media.get(url);
     if (!item) throw new Error("fake media not found");
     return item;
+  }
+
+  async releaseMedia(url: string): Promise<void> {
+    this.released.push(url);
   }
 
   async sendText(from: string | null, to: string, text: string, opts: SendOptions): Promise<SendResult> {

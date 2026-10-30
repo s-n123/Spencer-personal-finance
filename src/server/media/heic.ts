@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { policy } from "@/server/config/policy";
 import { AppError, logError } from "@/server/errors";
 import { fireAndForget } from "@/server/safe";
 // Type-only: a runtime import would pull the 2 MB WASM bundle into the main-thread chunk too.
@@ -14,8 +15,6 @@ import type { HeicErrorCode, HeicRequest, HeicResponse } from "./heic-worker";
 // The worker is spawned from `new URL("./heic-worker.ts", import.meta.url)`: Node runs it with
 // built-in type stripping (Vitest, tsx scripts) and Next.js bundles it as a separate worker entry.
 // There is no in-process fallback: a failed spawn is reported as a retryable media error.
-
-const DECODE_TIMEOUT_MS = 20_000;
 
 export interface RawImage {
   width: number;
@@ -186,7 +185,7 @@ export function decodeHeic(
       // Copy, then transfer the copy: the caller's buffer may be a view into a shared pool slab.
       bytes: new Uint8Array(bytes).buffer,
       maxPixels: opts.maxPixels,
-      timeoutMs: opts.timeoutMs ?? DECODE_TIMEOUT_MS,
+      timeoutMs: opts.timeoutMs ?? policy.media.heicDecodeTimeoutMs,
       settled: false,
       resolve: (img) => {
         signal?.removeEventListener("abort", onAbort);

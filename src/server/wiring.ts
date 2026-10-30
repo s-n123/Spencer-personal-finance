@@ -41,7 +41,9 @@ function buildDeps(env: Env): Deps {
     models: { main: env.MODEL_MAIN, fast: env.MODEL_FAST, mainEffort: env.MODEL_MAIN_EFFORT },
     handoff:
       env.APP_BASE_URL && env.INTERNAL_KICK_SECRET
-        ? createHttpHandoff(env.APP_BASE_URL, env.INTERNAL_KICK_SECRET)
+        ? createHttpHandoff(env.APP_BASE_URL, env.INTERNAL_KICK_SECRET, {
+            bypassSecret: env.VERCEL_AUTOMATION_BYPASS_SECRET,
+          })
         : null,
     pipeline: { prefetchMedia, ensureMedia, runAgent },
   };

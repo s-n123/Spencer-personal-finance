@@ -13,8 +13,8 @@ import { resizedSize } from "./resize";
 // libvips' operation cache would keep decoded health photos in memory between requests.
 sharp.cache(false);
 
-/** Decompression-bomb guard, checked against header dimensions before any pixels are decoded. */
-const MAX_INPUT_PIXELS = 80_000_000;
+// Decompression-bomb guard (policy.media.maxInputPixels): checked against header dimensions
+// before any pixels are decoded.
 
 export type ImageType = "jpeg" | "png" | "gif" | "webp" | "heic" | "avif";
 
@@ -113,7 +113,7 @@ export async function processImage(bytes: Uint8Array, opts: { signal?: AbortSign
 async function fromEncoded(bytes: Uint8Array): Promise<{ pipeline: Sharp; width: number; height: number }> {
   // pages: 1 reads only the first frame of an animated GIF/WebP. failOn "warning" is sharp's
   // recommendation for untrusted input; "error" let corrupt entropy data decode into noise.
-  const pipeline = sharp(bytes, { autoOrient: true, failOn: "warning", limitInputPixels: MAX_INPUT_PIXELS, pages: 1 });
+  const pipeline = sharp(bytes, { autoOrient: true, failOn: "warning", limitInputPixels: policy.media.maxInputPixels, pages: 1 });
   let meta: Metadata;
   try {
     meta = await pipeline.metadata();
@@ -124,7 +124,7 @@ async function fromEncoded(bytes: Uint8Array): Promise<{ pipeline: Sharp; width:
   const width = meta.autoOrient?.width ?? meta.width;
   const height = meta.autoOrient?.height ?? meta.height;
   if (!width || !height) throw new AppError("image_corrupt");
-  if (width * height > MAX_INPUT_PIXELS) throw new AppError("image_too_many_pixels");
+  if (width * height > policy.media.maxInputPixels) throw new AppError("image_too_many_pixels");
   return { pipeline, width, height };
 }
 
@@ -134,10 +134,10 @@ async function fromHeic(
 ): Promise<{ pipeline: Sharp; width: number; height: number }> {
   // libheif applies the HEIF irot/imir transforms itself, so the pixels are already upright and
   // the raw buffer carries no metadata at all.
-  const raw = await decodeHeic(bytes, { maxPixels: MAX_INPUT_PIXELS, signal });
+  const raw = await decodeHeic(bytes, { maxPixels: policy.media.maxInputPixels, signal });
   const pipeline = sharp(raw.rgba, {
     raw: { width: raw.width, height: raw.height, channels: 4 },
-    limitInputPixels: MAX_INPUT_PIXELS,
+    limitInputPixels: policy.media.maxInputPixels,
   });
   return { pipeline, width: raw.width, height: raw.height };
 }

@@ -139,7 +139,10 @@ async function runAgentStep(
   await commitReply(deps, ctx, turn, {
     anchor: rest[rest.length - 1].id,
     bubbles,
-    kind: output.mode === "safety" ? "safety" : "reply",
+    // A refusal is the agent's reply, not crisis copy: it stays pause-checked so a STOP sent
+    // during the model call still suppresses it. The turn's 'safety' mode (set at commit) keeps it
+    // out of history.
+    kind: "reply",
     agent: output,
   });
   return output;
@@ -169,7 +172,12 @@ async function commitReply(
     );
     if (!written.fenced) throw new LeaseLostError();
     const agentFields = reply.agent
-      ? { iterations: reply.agent.usage.length, usage: reply.agent.usage, stopReason: reply.agent.stopReason }
+      ? {
+          iterations: reply.agent.usage.length,
+          usage: reply.agent.usage,
+          stopReason: reply.agent.stopReason,
+          ...(reply.agent.mode === "safety" ? { mode: "safety" as const } : {}),
+        }
       : {};
     const updated = await tx
       .update(turns)

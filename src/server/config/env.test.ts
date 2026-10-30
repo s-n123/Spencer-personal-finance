@@ -8,7 +8,7 @@ import { envSchema, getEnv, resetEnvForTests, simulatorEnabled } from "./env";
 // the platform), every example value validates, and the simulator can never be on in production.
 
 const EXAMPLE = fileURLToPath(new URL("../../../.env.example", import.meta.url));
-const PLATFORM_KEYS = new Set(["NODE_ENV", "VERCEL_ENV"]);
+const PLATFORM_KEYS = new Set(["NODE_ENV", "VERCEL_ENV", "VERCEL_AUTOMATION_BYPASS_SECRET"]);
 
 function exampleEntries(): Map<string, string> {
   const entries = new Map<string, string>();
@@ -62,6 +62,18 @@ describe("simulatorEnabled", () => {
     expect(simulatorEnabled(envSchema.parse({ ENABLE_SIMULATOR: "1", VERCEL_ENV: "development" }))).toBe(true);
     expect(simulatorEnabled(envSchema.parse({}))).toBe(false);
     expect(simulatorEnabled(envSchema.parse({ ENABLE_SIMULATOR: "false" }))).toBe(false);
+  });
+
+  it("getEnv refuses the offline model on a production deployment", () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("LLM_PROVIDER", "fake");
+    expect(() => getEnv()).toThrow(/LLM_PROVIDER/);
+  });
+
+  it("requires INTERNAL_KICK_SECRET to be at least 32 characters when set", () => {
+    expect(envSchema.safeParse({ INTERNAL_KICK_SECRET: "short" }).success).toBe(false);
+    expect(envSchema.parse({ INTERNAL_KICK_SECRET: "" }).INTERNAL_KICK_SECRET).toBeUndefined();
+    expect(envSchema.parse({ INTERNAL_KICK_SECRET: "x".repeat(32) }).INTERNAL_KICK_SECRET).toHaveLength(32);
   });
 
   it("getEnv refuses a production deployment with the flag set", () => {

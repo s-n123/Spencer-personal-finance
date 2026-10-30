@@ -85,6 +85,10 @@ export const turns = pgTable(
   (t) => [
     index("turns_user_id_created_at_idx").on(t.userId, t.createdAt),
     index("turns_created_at_idx").on(t.createdAt),
+    // Orphan recovery runs on every lease acquire; keep it independent of history length.
+    index("turns_open_user_id_idx")
+      .on(t.userId, t.createdAt)
+      .where(sql`${t.status} in ('claimed', 'effects_committed', 'reply_written')`),
     check(
       "turns_status_check",
       sql`${t.status} in ('claimed', 'effects_committed', 'reply_written', 'done', 'failed')`,

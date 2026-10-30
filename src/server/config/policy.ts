@@ -54,6 +54,10 @@ export const policy = {
     maxVisualTokens: 4_784,
     jpegQuality: 85,
     retentionDays: 30,
+    /** Inputs above this many pixels are rejected before decoding (decompression-bomb guard). */
+    maxInputPixels: 80_000_000,
+    /** Per-decode limit for the HEIC worker; a timeout replaces the worker. */
+    heicDecodeTimeoutMs: 20_000,
   },
   messages: {
     textRetentionDays: 90,

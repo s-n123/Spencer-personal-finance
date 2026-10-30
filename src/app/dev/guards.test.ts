@@ -101,7 +101,7 @@ describe("with the simulator on", () => {
 
 describe("POST /api/internal/kick", () => {
   it("is not simulator-gated: with the simulator off it still authenticates by its secret", async () => {
-    setEnv({ ENABLE_SIMULATOR: "false", INTERNAL_KICK_SECRET: "kick-secret-0a6c1f2e" });
+    setEnv({ ENABLE_SIMULATOR: "false", INTERNAL_KICK_SECRET: "kick-secret-0a6c1f2e-for-tests-only-0000" });
     const kickRequest = (auth?: string) =>
       new Request(`${BASE}/api/internal/kick`, {
         method: "POST",
@@ -114,7 +114,7 @@ describe("POST /api/internal/kick", () => {
 
     const run = vi.fn();
     wiring.getDeps.mockReturnValueOnce({ runner: { run } } as unknown as Deps);
-    expect((await postKick(kickRequest("Bearer kick-secret-0a6c1f2e"))).status).toBe(202);
+    expect((await postKick(kickRequest("Bearer kick-secret-0a6c1f2e-for-tests-only-0000"))).status).toBe(202);
     expect(run).toHaveBeenCalledTimes(1);
   });
 });

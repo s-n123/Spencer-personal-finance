@@ -30,7 +30,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 
 ## Stack
 
-- **D-010 · Next.js 16.4.3 (latest stable), App Router, `src/` directory, Turbopack, npm, Node ≥22.12 (`.nvmrc` 22).** Vitest 5 requires Node ≥22.12, which raised the floor from Next's ≥20.9. · Current stable version; `src/` separates routes from server modules. · active
+- **D-010 · Next.js 16.4.3 (latest stable), App Router, `src/` directory, Turbopack, npm, Node ≥22.18 (`.nvmrc` 22).** Vitest 5 requires Node ≥22.12; the HEIC worker is a `.ts` file that Vitest and tsx run with Node's built-in type stripping, on by default from 22.18 (D-137). · Current stable version; `src/` separates routes from server modules. · active
 - **D-011 · Cache Components off.** · With it on, GET route handlers that read no request data are prerendered at build and frozen, a trap for the cron and polling routes. · active
 - **D-012 · `proxy.ts` (not `middleware.ts`), Node runtime everywhere, no Edge. `proxy.ts` is never the only auth layer; handlers re-check.** · Next 16 deprecates middleware and Edge; sharp and pg need Node. · active
 - **D-013 · Postgres driver: `pg` + `drizzle-orm/node-postgres` with `attachDatabasePool`.**
@@ -183,6 +183,63 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-123 · The simulator posts one inbound event per attached image plus one for the text.** · Mirrors Sendblue's one-webhook-per-attachment behaviour, so turn batching is exercised in dev. · active
 - **D-124 · Pipeline modules receive media and agent entry points through `deps.pipeline` (contracts in `src/server/pipeline/contracts.ts`).** · Each module can be built and tested in isolation, and tests stub the others. · active
 - **D-125 · `package.json` is `"type": "module"`; all scripts run through `tsx --conditions=react-server` with `scripts/_env.ts` loading `.env.local` via `@next/env`.** · `server-only` throws without that condition, and plain tsx doesn't load env files. · active
+
+- **D-126 · An agent refusal goes out as an ordinary `reply` (pause-checked), and the turn is marked mode `safety` when its reply is committed. Refused turns are left out of history whole.** · Refusal copy is not crisis copy: a STOP sent during the model call must still suppress it. Marking the turn at commit means recovery closes it as `safety` too. · active
+- **D-127 · Self-handoff:**
+  - With no HTTP handoff configured (`APP_BASE_URL` plus `INTERNAL_KICK_SECRET`), a kick that is low on time runs the turn in place with the time left (logged `kick.no_handoff`).
+  - A failed HTTP handoff (401, network error) also falls back to running in place.
+  - Handoffs send `x-vercel-protection-bypass` from `VERCEL_AUTOMATION_BYPASS_SECRET` when Vercel sets it.
+  - `INTERNAL_KICK_SECRET` must be at least 32 characters.
+  - · Reason: re-scheduling on `after()` inside the same invocation inherits the same deadline and loops until the function dies. A failed handoff must not leave a burst for a sweep that may be hours away on Hobby. The kick secret is the only authentication on that route. · active
+- **D-128 · `LLM_PROVIDER=fake` is refused when `VERCEL_ENV=production`.** · The offline model would answer real users with demo text. · active
+- **D-129 · The lease heartbeat is a 15 s wall-clock timer plus a renewal at each checkpoint; tests inject `heartbeatSleeper`.** · Identical behaviour in production. A heartbeat on `FakeSleeper` would advance the shared fake clock under the test. · active
+- **D-130 · Screen rules (`src/server/pipeline/screen.ts`):**
+  - Opt-out phrases match only at the start of a message, followed by punctuation or the end.
+  - Crisis precedence: self_harm, then emergency, then ed.
+  - Any phrase hit (crisis or an opt-out phrase) stores NULL text; a bare keyword such as `STOP` keeps its text.
+  - The crisis kind is never logged.
+  - The patterns accept some hyperbole false positives ("I can't breathe (laughing)", "passed out on the couch", a bare "suicide") for recall; the emergency copy is worded conditionally.
+  - · Reason: PLAN §2.1 step 4 stores only tags for phrase hits. An inferred health category next to a user ID is consumer health data under MHMDA. Missing a real crisis costs more than an unneeded resource message. · review (owner: read the pattern list)
+- **D-131 · START and STOP in one burst:**
+  - START locks the user row (`SELECT … FOR UPDATE`) before checking for a later STOP.
+  - A later STOP in the same burst supersedes START.
+  - Non-command rows in a STOP burst are ignored.
+  - In a `[hi, START]` burst, "hi" is answered after START resumes the user.
+  - · Reason: without the lock, START could read a stale snapshot and unpause a user whose STOP was being ingested at that moment (reproduced on PG16). Answering "hi" matches what someone who just resumed expects. · active
+- **D-132 · Turn failures:**
+  - An agent error or a reply with no sendable bubbles gets the fixed apology, with `error_code` recorded.
+  - An orphaned turn with nothing committed is re-run once, as mode `recovery`; a second orphan gets the apology.
+  - An orphan whose intents were committed has them sent without a re-run.
+  - `sendPending` only runs for the lease owner.
+  - · Reason: at-most-once sends and no silent drops. A re-run is safe only before anything is committed. · active
+- **D-133 · Paused users' photos are not prefetched. If START resumes them, `ensureMedia` fetches the photos inline.** · Don't download photos for messages the router will ignore. · active
+- **D-134 · Media pipeline defaults:**
+  - sharp `failOn: 'warning'` (its default), revisited with owner photos.
+  - One lazily created HEIC worker per instance (a FIFO pool of one). Each decode has a 20 s timeout (`policy.media.heicDecodeTimeoutMs`); a timeout terminates and replaces the worker and fails only that decode. No in-process fallback.
+  - An 80 MP input cap (`policy.media.maxInputPixels`), checked against the header before decoding.
+  - Photos beyond the 6-per-turn cap are omitted.
+  - Retry and failure: rows fail after 3 attempts; an abort gives the attempt back; failed rows clear `provider_url`; a storage read error fails only that image.
+  - The adapter is chosen by the inbound message's provider.
+  - The blob key is deterministic, so a superseded claimer never deletes the live blob.
+  - Adapters get `releaseMedia(url)` once a row is stored or has failed for good; the simulator uses it to delete its staged original, which still has EXIF and GPS.
+  - · Reason: bounded memory and time per instance; at-most-once downloads under races; no raw originals kept (D-050). · active
+- **D-135 · Agent defaults:**
+  - A history "exchange" is one earlier turn's sent reply and command bubbles; an unanswered user message folds into the next exchange.
+  - A too-long reply gets one shorten retry, sent as a mid-conversation `system` message. If that returns a 400 it is retried once as a user-turn note; after that the reply is truncated by whole bubbles.
+  - A `max_tokens` stop is retried once at 16000 tokens.
+  - Canned replies record `stop_reason` as `error:<kind>`.
+  - `SYSTEM_PROMPT` is pinned by a sha256 test; bump `SYSTEM_PROMPT_VERSION` when it changes.
+  - · Reason: predictable token use; never drop a reply; the static prompt stays byte-stable for caching. · active
+- **D-136 · Simulator:**
+  - Off on preview deployments until `/admin` auth lands in M5.
+  - Requests are capped at 9.5 MB, with client-side splitting.
+  - Cross-site POSTs are refused with 403, judged by `Sec-Fetch-Site` with `Origin` vs `Host` as the fallback.
+  - `toLine` is null.
+  - `db:reset` clears only `users/` and `sim-inbox/` under `MEDIA_LOCAL_DIR`.
+  - The LLM client is created on first use.
+  - · Reason: with `proxy.ts` present, Next buffers request bodies only up to 10 MB and silently truncates the rest. Route handlers have no CSRF protection, so any website could otherwise spend API credit or wipe the dev DB. DNS rebinding is not covered (dev only, fictional users). · active
+- **D-137 · Node floor ≥22.18 (`engines`).** · Built-in type stripping runs the `.ts` HEIC worker under Vitest, tsx and plain Node. Production is unaffected, since Next bundles the worker. · active
+- **D-138 · `turns_open_user_id_idx`: a partial index on `turns(user_id, created_at)` for the open statuses.** · Orphan recovery runs on every lease acquire; without it the cost grows with each user's history. · active
 
 ## Billing (M7)
 

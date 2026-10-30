@@ -121,7 +121,7 @@ describe("instrumentation onRequestError", () => {
       event: "request.error",
       route: "/api/dev/sim/thread",
       kind: "route",
-      phase: "GET",
+      method: "GET",
       errorName: expect.any(String),
       sqlState: "23505",
       constraint: "users_phone_e164_key",

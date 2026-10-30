@@ -39,6 +39,7 @@ const ALLOWED_FIELDS = new Set([
   "httpStatus",
   "reason",
   "phase",
+  "method",
   "model",
 ]);
 
