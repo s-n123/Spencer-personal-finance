@@ -30,7 +30,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 
 ## Stack
 
-- **D-010 · Next.js 16.4.3 (latest stable), App Router, `src/` directory, Turbopack, npm, Node ≥20.9 (`.nvmrc` 22).** · Current stable version; `src/` separates routes from server modules. · active
+- **D-010 · Next.js 16.4.3 (latest stable), App Router, `src/` directory, Turbopack, npm, Node ≥22.12 (`.nvmrc` 22).** Vitest 5 requires Node ≥22.12, which raised the floor from Next's ≥20.9. · Current stable version; `src/` separates routes from server modules. · active
 - **D-011 · Cache Components off.** · With it on, GET route handlers that read no request data are prerendered at build and frozen, a trap for the cron and polling routes. · active
 - **D-012 · `proxy.ts` (not `middleware.ts`), Node runtime everywhere, no Edge. `proxy.ts` is never the only auth layer; handlers re-check.** · Next 16 deprecates middleware and Edge; sharp and pg need Node. · active
 - **D-013 · Postgres driver: `pg` + `drizzle-orm/node-postgres` with `attachDatabasePool`.**
@@ -66,7 +66,7 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
   - · Reason: SDK 1.3.0 honours `retry-after` up to about 24 days, and only an abort signal interrupts it. · active
 - **D-036 · `metadata.user_id` = opaque user UUID; SDK OpenTelemetry disabled; `ANTHROPIC_LOG` cannot be debug in production.** · Privacy. · active
 - **D-037 · Images go as base64 blocks only: no URL sources, no Files API.** · URL sources would need public URLs to health photos, and the Files API isn't ZDR-eligible. · active
-- **D-038 · No server-side refusal fallback. A `refusal` stop sends a canned caring reply with resources.** · The fallback covers only cyber and frontier_llm; our likely category is general_harms. · active
+- **D-038 · ~~No server-side refusal fallback.~~ Superseded 2026-10-30: requests use the beta endpoint with `fallbacks: "default"` (`server-side-fallback-2026-07-01`), toggled by `ANTHROPIC_FALLBACKS`. A `refusal` that still comes back gets a canned caring reply with resources.** · Anthropic's current guidance is to enable the fallback by default for Sonnet 5.5. It only retries `cyber` and `frontier_llm` declines, so it rarely matters here, but it costs nothing when unused. Our likely category (`general_harms`) still gets the canned reply. · active
 - **D-039 · Haiku triage uses `messages.parse` + `zodOutputFormat` with thinking off. It runs during the debounce wait, and only its result fields are stored.** · Takes it off the latency critical path; stores no extra copy of the text. · active
 
 ## Pipeline
@@ -174,6 +174,15 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-103 · Errors are sanitized centrally (a wrapper on every route and `after()` task, plus `onRequestError`): only name, SQLSTATE, constraint and table are logged. A CI canary test enforces it.** · `DrizzleQueryError.message` embeds bound parameters and pg errors include "Failing row contains (…)". · active
 - **D-104 · No analytics, pixels or third-party scripts on any page, including the pay pages.** · SPEC; FTC health-data enforcement history. · active
 - **D-105 · Launch gate (end of M6): the Sendblue line stays limited to the owner's test numbers until processor DPAs/terms, live counsel-reviewed policy and CHD notice URLs, an HBNR breach runbook and an Anthropic retention position exist.** · MHMDA processor contracts; FTC HBNR readiness. · review
+
+## Milestone 1 build choices
+
+- **D-120 · `LLM_PROVIDER=fake` runs a deterministic offline model that describes what it received (photo count, dimensions) without calling the API.** · Lets the owner try the full simulator → pipeline → reply loop without an Anthropic key. Tests use a separate scripted fake. · active
+- **D-121 · The full 4 s debounce and lease algorithm ships in M1; M2 adds the batching-specific tests and tuning.** · It is the same code either way, and a debounced M1 behaves like the real product. (The plan had said `DEBOUNCE_MS=0` in M1.) · active
+- **D-122 · No `next/font/google`: the system font stack only.** · No third-party requests at build or run time (SPEC: no trackers), and the build container can't reach Google Fonts. · active
+- **D-123 · The simulator posts one inbound event per attached image plus one for the text.** · Mirrors Sendblue's one-webhook-per-attachment behaviour, so turn batching is exercised in dev. · active
+- **D-124 · Pipeline modules receive media and agent entry points through `deps.pipeline` (contracts in `src/server/pipeline/contracts.ts`).** · Each module can be built and tested in isolation, and tests stub the others. · active
+- **D-125 · `package.json` is `"type": "module"`; all scripts run through `tsx --conditions=react-server` with `scripts/_env.ts` loading `.env.local` via `@next/env`.** · `server-only` throws without that condition, and plain tsx doesn't load env files. · active
 
 ## Billing (M7)
 

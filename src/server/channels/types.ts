@@ -22,6 +22,8 @@ export interface InboundMessage {
   sentAt: Date;
   service?: "iMessage" | "SMS" | "RCS";
   providerConversationId?: string;
+  /** IANA timezone hint (the simulator sends the browser's zone); used only if the user has none. */
+  timezoneHint?: string;
 }
 
 export type IgnoredReason = "group" | "reaction" | "non_e164" | "outbound_echo" | "unknown";
