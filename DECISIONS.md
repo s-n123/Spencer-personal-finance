@@ -247,8 +247,8 @@ From the M1 review:
   - It is a pause-checked `reply` intent, keyed `command:<START id>:0`, sent right after START applies and before the agent runs.
   - Resuming and writing it are one fenced transaction, so "applied" means "confirmed".
   - Writing it doesn't move the turn past `claimed`. Recovery ignores `command:` keys when deciding whether an orphan was committed (amends D-132), so the rest of the burst is re-run.
-  - A re-run that finds the confirmation never re-applies START, even if a STOP arrived since.
-  - A twice-orphaned turn marks crisis, STOP and confirmed START rows done; the apology covers the rest.
+  - A re-run that finds the confirmation never re-applies START, even if a STOP arrived since. "Superseded" is decided by a STOP sent after that START, not by the pause state, so a re-run of `[START, STOP, START]` still ignores the first START.
+  - A twice-orphaned turn marks crisis, STOP and confirmed START rows done; the apology covers the rest. A START whose transaction never committed is failed with the rest: the user stays paused (so the pause-checked apology is suppressed) and must send START again. That needs two holder deaths in the few DB round trips before START commits, and it fails closed, so no code handles it.
   - · Reason: it is only true while the user is resumed, so a STOP that lands before it is sent must suppress it, and a STOP during the model call now comes after it. A dead holder's burst must still get its question answered (D-131, D-132). Re-applying START in a re-run could un-pause a user who was last told "You're unsubscribed". Its own key namespace means no apology anchored on START can collide with it.
   - Open (M6): ingest pauses on a STOP by arrival, while START compares send times. A provider that redelivers an older STOP late could still reorder them; revisit with Sendblue's redelivery behaviour.
   - · active

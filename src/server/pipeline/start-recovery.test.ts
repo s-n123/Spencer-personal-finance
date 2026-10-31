@@ -159,6 +159,43 @@ describe("START and recovery", () => {
     expect((await userRow()).messagingPausedAt).not.toBeNull();
   });
 
+  it("a re-run of [START, STOP, START] keeps the first START superseded: one confirmation", async () => {
+    await send(message("STOP"));
+    await runner.flush();
+    deps.clock.advance(60_000);
+    // The holder dies right after the second START's confirmation goes out: its lease lapses
+    // during that send, so finishTurn never commits.
+    let killed = false;
+    deps.adapter.onSend = (m) => {
+      if (!killed && m.text === START_CONFIRMATION) {
+        killed = true;
+        deps.clock.advance(timing.leaseTtlMs + 1);
+      }
+    };
+    await send(message("START"));
+    deps.clock.advance(1_000);
+    await send(message("STOP"));
+    deps.clock.advance(1_000);
+    await send(message("START"));
+    await runner.flush();
+    expect(killed).toBe(true);
+    expect((await deps.db.select().from(turns)).map((x) => x.status)).toContain("claimed");
+
+    deps.clock.advance(timing.leaseTtlMs + 1);
+    await kick(deps, (await userRow()).id);
+    // The re-run still sees the STOP sent after the first START, although the second START has
+    // resumed the user by then.
+    expect(deps.adapter.textsTo(PHONE).map(label)).toEqual(["STOP_CONF", "START_CONF"]);
+    const rows = await deps.db.select().from(inboundMessages).orderBy(asc(inboundMessages.sentAt));
+    expect(rows.map((r) => [r.text, r.status])).toEqual([
+      ["STOP", "done"],
+      ["START", "ignored"],
+      ["STOP", "done"],
+      ["START", "done"],
+    ]);
+    expect((await userRow()).messagingPausedAt).toBeNull();
+  });
+
   it("the same late STOP without a holder death leaves the user paused, reply suppressed", async () => {
     await send(message("STOP"));
     await runner.flush();

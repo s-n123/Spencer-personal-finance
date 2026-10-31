@@ -337,20 +337,24 @@ async function applyStart(deps: Deps, ctx: TurnContext, turn: ClaimedTurn, row: 
       sql`select 1 as one from outbound_messages where idempotency_key = ${commandKey(row.id, 0)}`,
     );
     if (prior.length > 0) return "already_confirmed";
-    const res = await selectRows<{ resumed: boolean }>(
+    // Superseded is decided by the later STOP itself, not by the pause state after the update: a
+    // later START in the same burst may already have resumed the user ([START, STOP, START]).
+    const res = await selectRows<{ superseded: boolean }>(
       tx,
-      sql`update users set
-            messaging_paused_at = case when exists (
-                select 1 from inbound_messages m
-                where m.user_id = ${userId} and m.keyword = 'STOP'
-                  and (m.sent_at, m.received_at) > (${sqlTs(row.sentAt)}, ${sqlTs(row.receivedAt)}))
-              then messaging_paused_at else null end,
+      sql`with later as (
+            select exists (
+              select 1 from inbound_messages m
+              where m.user_id = ${userId} and m.keyword = 'STOP'
+                and (m.sent_at, m.received_at) > (${sqlTs(row.sentAt)}, ${sqlTs(row.receivedAt)})) as superseded)
+          update users set
+            messaging_paused_at = case when later.superseded then messaging_paused_at else null end,
             updated_at = ${sqlTs(now)}
+          from later
           where id = ${userId} and ${leaseFence(ctx.lease, now)}
-          returning messaging_paused_at is null as resumed`,
+          returning later.superseded as superseded`,
     );
     if (res.length === 0) throw new LeaseLostError();
-    if (!res[0].resumed) return "superseded";
+    if (res[0].superseded) return "superseded";
     const written = await writeReplyIntents(
       deps,
       {
