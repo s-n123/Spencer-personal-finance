@@ -241,6 +241,36 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 - **D-137 · Node floor ≥22.18 (`engines`).** · Built-in type stripping runs the `.ts` HEIC worker under Vitest, tsx and plain Node. Production is unaffected, since Next bundles the worker. · active
 - **D-138 · `turns_open_user_id_idx`: a partial index on `turns(user_id, created_at)` for the open statuses.** · Orphan recovery runs on every lease acquire; without it the cost grows with each user's history. · active
 
+From the M1 review:
+
+- **D-139 · The START confirmation:**
+  - It is a pause-checked `reply` intent, sent right after START applies and before the agent runs.
+  - Writing it doesn't move the turn past `claimed`.
+  - Recovery ignores the `reply:<START id>:0` key when deciding whether an orphan was committed (amends D-132), so the rest of the burst is re-run.
+  - · Reason: it is only true while the user is resumed, so a STOP that lands before it is sent must suppress it. A STOP during the model call now comes after it. A dead holder's burst must still get its question answered (D-131, D-132). The re-run is safe because `applyStart` is idempotent and the key dedupes. · active
+- **D-140 · Deadline aborts:**
+  - The agent's signal (`ensureMedia`, `runAgent`) also fires at deadline − `sendReserveMs`.
+  - Each LLM call's signal fires at deadline − `llmDeadlineMarginMs`.
+  - A deadline abort while the lease is still held fails the turn with `error_code` `deadline` and the apology.
+  - · Reason: SDK 1.3.0 honours `retry-after` up to 2^31−1 ms. Only an abort ends that sleep, and the per-attempt `timeout` doesn't bound it (completes D-035). · active
+- **D-141 · Unused photos are discarded:**
+  - Photos of rows a turn ignores or fails are set to `failed` / `media_unused` with `provider_url` NULL, in `finishTurn`'s transaction. `adapter.releaseMedia(url)` is called for each after commit.
+  - Rows exhausted by attempts are released the same way.
+  - A row a live downloader holds is left to that downloader.
+  - · Reason: no staged original with EXIF/GPS, and no provider photo URL, kept without a purge date (D-050, D-134). · active
+- **D-142 · Logs mask the turn modes `safety`, `care` and `command` as `handled`, and `inbound.accepted` no longer logs the STOP keyword.** · A crisis or care mode next to a user ID is consumer health data (MHMDA, D-130). Crisis copy and the STOP confirmation are both `priority` sends, so logging STOP would single out crisis copy by elimination. · active
+- **D-143 · History also leaves out any turn whose `stop_reason` is `refusal`, not only mode `safety`. `finishTurn` keeps `safety` for a refused recovery re-run.** · D-126: a refused turn stays out of history even if it is closed under another mode. · active
+- **D-144 · `npm run dev` passes `-H 127.0.0.1` to `next dev` unless `-H`/`--hostname` is given. `npm run dev -- -H 0.0.0.0` opens it to the LAN.**
+  - · Reason: `next dev` defaults to 0.0.0.0. The simulator exposes threads, photos, API spend and `db:reset`, and D-136's cross-site check doesn't cover direct LAN requests.
+  - Not done: a Host-header allowlist on simulator routes, which would also close DNS rebinding (D-136). Small; add it if the owner wants LAN use to be safe.
+  - · active
+- **D-145 · `devIndicators: false` in `next.config.ts`.** · At phone width the bottom-left indicator covers the simulator's attach button. Next still shows compile and runtime errors. · active
+- **D-146 · `drizzle.config.ts` loads `.env.local` through `loadEnvConfig` (a named import from `@next/env`).** · drizzle-kit doesn't run through `scripts/_env.ts`, and a default import is undefined under its loader. Without this, `db:studio` and `db:generate` silently fell back to the PGlite URL (extends D-125). · active
+- **D-147 · `turns.usage` records the serving `model` and `cacheWrite1hTokens`. Fallback-served responses also record per-attempt `attempts` from `usage.iterations`, with an info log `llm.fallback_served {userId, model}`.** · Anthropic bills each attempt (including the declined one), and 1 h cache writes cost more than 5 m ones. Top-level usage covers only the attempt that produced the message. jsonb only, so no migration. · active
+- **D-148 · Owner-photo `.gitignore` rules are case-insensitive and cover jpg, jpeg, png, heic, heif, heics, heifs, webp, gif, avif, tif, tiff, dng and mov. A hygiene test rejects tracked images under `fixtures/` outside `fixtures/synthetic/`.** · iPhone exports are `IMG_NNNN.JPG`, and git matches case by default on Linux. The repo is public (D-003). · active
+- **D-149 · `package.json` has no script whose file doesn't exist yet; a test enforces this. `eval` and `fixtures:synthetic` come back with their milestones (M2b).** · `npm run eval` crashed with `ERR_MODULE_NOT_FOUND`. · active
+- **D-150 · The `test:pg` teardown waits (up to 5 s) for the pool's backends to exit before `drop database … with (force)`.** · pg-pool's `end()` doesn't await `client.end()`. A forced drop then terminated closing connections, and the unhandled 57P01 failed about 1 run in 3. · active
+
 ## Billing (M7)
 
 - **D-110 · The trial lives in our DB (7 days from consent, no card, no Stripe objects). USD, monthly plan only. Stripe objects are created at Checkout.** · Avoids card-network trial rules. Price is an owner question. · review

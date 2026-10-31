@@ -2,7 +2,7 @@
 
 An AI nutrition coach used entirely over iMessage: meal photos, menus, supplement labels, text questions, opt-in check-ins.
 
-**Status:** planning. `docs/PLAN.md` v2 is awaiting the owner's OK; the scaffold lands in M1. Update this line as milestones complete.
+**Status:** M1 (scaffold) complete: simulator, message pipeline, photo handling, an agent that describes photos. Awaiting the owner's go-ahead for M2a. Update this line as milestones complete.
 
 ## Read first
 - `SPEC.md`: the owner's spec, verbatim. **It is the source of truth.**
@@ -23,20 +23,22 @@ An AI nutrition coach used entirely over iMessage: meal photos, menus, supplemen
 - No secrets in code. Keep `.env.example` in sync (a test enforces key parity with `src/server/config/env.ts`).
 - Product tunables (caps, quiet hours, guardrails, debounce, retention, trial) live in `src/server/config/policy.ts`, not env.
 
-## Commands (available from M1)
+## Commands
+
+Rows marked with a milestone don't exist yet.
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Loads env, auto-starts the PGlite socket server (127.0.0.1:54330), migrates, runs `next dev` |
+| `npm run dev` | Loads env, auto-starts the PGlite socket server (127.0.0.1:54330), migrates, runs `next dev` on 127.0.0.1 (`-- -H 0.0.0.0` for the LAN) |
 | `npm run check` | typecheck + lint + migration/schema check + unit tests |
-| `npm test` | Unit tests only: PGlite, fake LLM, fake FDC, no network |
+| `npm test` | Unit tests only: PGlite, fake LLM, no network (a fake FDC arrives in M2a) |
 | `npm run test:pg` | node-postgres suite + race tests on a throwaway PG16 (or `TEST_DATABASE_URL`) |
 | `npm run db:generate -- --name <x>` | New migration. Never edit an applied migration |
 | `npm run db:migrate` / `db:check` / `db:reset` / `db:studio` | Migration tooling |
-| `npm run eval` (all suites) or `npm run eval -- --suite meals\|menus\|labels\|text\|safety` | Runs fixtures through the agent via the simulator. Costs money and needs `ANTHROPIC_API_KEY` |
-| `npm run fdc:seed` / `fdc:record` / `fdc:search -- "<q>"` | FDC seed import, owner-run fixture recording, CLI search |
-| `npm run cron:tick -- --at <ISO>` | Run the proactive/sweep tick at a simulated time (dev only) |
-| `npm run fixtures:synthetic` / `fixtures:strip` | Generate synthetic label and menu images; strip metadata from owner photos |
+| `npm run eval` (all suites) or `npm run eval -- --suite meals\|menus\|labels\|text\|safety` | **(M2b)** Runs fixtures through the agent via the simulator. Costs money and needs `ANTHROPIC_API_KEY` |
+| `npm run fdc:seed` / `fdc:record` / `fdc:search -- "<q>"` | **(M2a)** FDC seed import, owner-run fixture recording, CLI search |
+| `npm run cron:tick -- --at <ISO>` | **(M5)** Run the proactive/sweep tick at a simulated time (dev only) |
+| `npm run fixtures:synthetic` / `fixtures:strip` | **(M2b/M3)** Generate synthetic label and menu images; strip metadata from owner photos |
 
 Scripts run via `tsx --conditions=react-server` and load env through `scripts/_env.ts` (`@next/env`). Plain tsx doesn't load `.env.local`, and `server-only` throws without that condition.
 
@@ -57,11 +59,12 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
 
 ## Privacy rules
 - **Never log** message bodies, photos, phone numbers, blob keys, LLM prompts or outputs, or raw provider payloads. Use `log.ts` (allowlisted fields) and user UUIDs.
+- **Nothing in a log line may reveal a crisis or care inference** (crisis kind, turn mode `safety`/`care`, which priority copy was sent). `log.ts` masks those modes as `handled` (D-142).
 - **Errors go through `sanitizeError()`.** Drizzle and pg error messages embed bound parameters ("Failing row contains …").
 - **No analytics, pixels or third-party scripts** anywhere.
 - **The GitHub repo is PUBLIC:**
   - only fictional numbers `+1NPA55501XX` in code, tests and docs;
-  - owner photo fixtures are gitignored (`fixtures/synthetic/` is committed);
+  - owner photo fixtures are gitignored, case-insensitively (`fixtures/synthetic/` is committed; a hygiene test rejects any other tracked image under `fixtures/`);
   - provider payloads only through `scripts/capture-payload.ts` redaction;
   - `eval-results/` is gitignored.
 - **Pre-consent (from M4):** store no free text (only commands and YES replies; age answers are stored as a tag), no media, no provider URLs. Until M4, simulator users are created as consented (dev-only).
@@ -80,7 +83,7 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
   - no user data in enum, const or pattern.
 - **Never replay** earlier turns' assistant, thinking or tool blocks. History is text-only.
 - **Caching:** `cache_control` (1 h) on the last tool and on the static system prompt, nothing per-user before them, plus the automatic 5-minute breakpoint. Keep tool order and system text byte-stable. Keep effort and thinking constant within a turn.
-- **Every call gets the turn `AbortSignal`** plus a deadline-derived `timeout` and `maxRetries`. The SDK otherwise honours `retry-after` for days.
+- **Every call gets the turn `AbortSignal`** plus a deadline-derived `timeout` and `maxRetries`. The SDK otherwise honours `retry-after` for days, and `timeout` doesn't bound that sleep, so the signal also fires at the deadline (D-140).
 - **Non-streaming `max_tokens` must stay ≤ ~21k** (the SDK throws). We use 8000 for Sonnet and 1024 for Haiku.
 - **Handle every stop reason:** `refusal` (canned caring reply), `max_tokens` (never run tools from it), `pause_turn`.
 - **Images:** base64 JPEG only (HEIC converted first), resized with the `resizedSize` port; no URL sources, no Files API. `metadata.user_id` = user UUID.
@@ -122,7 +125,7 @@ Scripts run via `tsx --conditions=react-server` and load env through `scripts/_e
 - **Docs:** bundled under `node_modules/next/dist/docs`.
 
 ## Tests
-- **`npm test` never touches the network.** Fakes live in `src/test/` (clock and sleeper, LLM, FDC, adapter).
+- **`npm test` never touches the network.** Fakes live in `src/test/` (clock and sleeper, LLM, adapter, memory storage; FDC from M2a).
 - **FDC fixtures carry provenance:**
   - `recorded`: owner-run `fdc:record`;
   - `third-party-capture <url>`: shape tests only;
