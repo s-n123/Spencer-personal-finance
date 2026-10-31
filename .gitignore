@@ -63,3 +63,6 @@ next-env.d.ts
 /fixtures/**/*.[dD][nN][gG]
 /fixtures/**/*.[mM][oO][vV]
 !/fixtures/synthetic/**
+
+# agent worktrees (Claude Code sessions)
+/.claude/worktrees/
