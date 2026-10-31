@@ -16,7 +16,8 @@ export const DEV_HOST = "127.0.0.1";
 
 /**
  * `next dev` arguments: loopback by default, so the simulator (threads, photos, the API key, db
- * reset) isn't reachable from the LAN. `npm run dev -- -H 0.0.0.0` opts in.
+ * reset) isn't reachable from the LAN. `npm run dev -- -H 0.0.0.0` opts in; next.config.ts allows
+ * this machine's LAN addresses as dev origins, so the page hydrates at http://<LAN IP>:3000.
  */
 export function nextDevArgs(extra: string[]): string[] {
   const hasHost = extra.some((a) => a.startsWith("-H") || a === "--hostname" || a.startsWith("--hostname="));

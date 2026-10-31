@@ -13,7 +13,7 @@ import { isValidTimeZone } from "@/server/time";
 import type { ClaimedTurn, TurnMode } from "./claim";
 import type { AgentTurnOutput, ClaimedMessage, UserRow } from "./contracts";
 import { LeaseLostError, leaseFence, sqlTs, type LeaseHandle, type PipelineTiming } from "./lease";
-import { sendPending, writeReplyIntents, type OutboundKind } from "./outbound";
+import { commandKey, sendPending, writeReplyIntents, type OutboundKind } from "./outbound";
 
 // TurnRouter (PLAN §2.2) for one claimed burst. The order is a safety property: rows the priority
 // path already answered -> commands -> (M4: onboarding, triage/care; M7: access gate) -> agent.
@@ -56,12 +56,11 @@ export async function runTurn(deps: Deps, ctx: TurnContext, turn: ClaimedTurn): 
   let confirmed = false;
   for (const r of rows) {
     if (r.keyword !== "START" || r.crisisKind) continue;
-    if (await applyStart(deps, ctx, r)) {
-      await commitConfirmation(deps, ctx, turn, r.id, START_CONFIRMATION);
+    if ((await applyStart(deps, ctx, turn, r)) === "superseded") {
+      outcome.ignored.push(r.id);
+    } else {
       outcome.done.push(r.id);
       confirmed = true;
-    } else {
-      outcome.ignored.push(r.id);
     }
   }
   // Sent before the agent runs, so a STOP during the model call can only come after it.
@@ -198,29 +197,6 @@ async function commitReply(
   });
 }
 
-/**
- * A command's confirmation, fenced. It is written only once the command took effect, so it is a
- * pause-checked 'reply': a STOP that lands before it is sent makes it untrue. The turn stays
- * 'claimed', so recovery still re-runs the agent part (applyStart is idempotent; the key dedupes).
- */
-async function commitConfirmation(
-  deps: Deps,
-  ctx: TurnContext,
-  turn: ClaimedTurn,
-  anchor: string,
-  text: string,
-): Promise<void> {
-  const written = await writeReplyIntents(deps, {
-    userId: ctx.lease.userId,
-    turnId: turn.id,
-    anchorInboundId: anchor,
-    bubbles: [text],
-    kind: "reply",
-    lease: ctx.lease,
-  });
-  if (!written.fenced) throw new LeaseLostError();
-}
-
 /** Closes the turn: row statuses plus the turn's final status and mode, fenced. */
 export async function finishTurn(
   deps: Deps,
@@ -274,9 +250,11 @@ interface UnusedMedia {
 }
 
 /**
- * Photos of rows no turn will process again (ignored, failed) are never downloaded: fail them and
- * clear their provider URL, returning it so the adapter can drop the staged original, which still
- * has EXIF and GPS (D-050). A row a downloader holds is left to it; it stores and releases.
+ * Photos of rows no turn will process again (ignored, failed) are never used: fail them and clear
+ * their provider URL, returning it so the adapter can drop the staged original, which still has
+ * EXIF and GPS (D-050, D-141). A live claim (the kick's prefetch) is taken over too: nothing would
+ * retry it after a retryable failure. The downloader's store and release writes are fenced on
+ * 'downloading', so they miss, and it deletes any blob it wrote.
  */
 function discardUnusedMedia(tx: Db, inboundIds: string[], now: Date, fence: SQL): Promise<UnusedMedia[]> {
   if (inboundIds.length === 0) return Promise.resolve([]);
@@ -293,7 +271,7 @@ function discardUnusedMedia(tx: Db, inboundIds: string[], now: Date, fence: SQL)
         set status = 'failed', error_code = 'media_unused', provider_url = null, claimed_until = null, updated_at = ${sqlTs(now)}
         from old
         where m.id = old.id and ${fence}
-          and (m.status = 'pending' or (m.status = 'downloading' and m.claimed_until < ${sqlTs(now)}))
+          and m.status in ('pending', 'downloading')
         returning m.id, m.user_id, old.provider_url, old.provider`,
   );
 }
@@ -335,18 +313,30 @@ export async function failTurn(
   );
 }
 
+type StartResult = "resumed" | "already_confirmed" | "superseded";
+
 /**
  * START resumes replies unless a STOP sent after it supersedes it (e.g. [START, STOP] in one
- * burst). Returns whether the user is now unpaused.
+ * burst). Resuming and writing the confirmation intent are one fenced transaction, so "applied"
+ * means "confirmed" (D-139):
+ * - The confirmation is a pause-checked 'reply': a STOP that lands before it is sent makes it untrue.
+ * - It is keyed command:<START id>:0 and doesn't commit the turn, so recovery re-runs the rest.
+ * - A re-run finds it and never re-evaluates the pause: a STOP that arrived since (even one sent
+ *   earlier, delivered late) must keep the user paused, since its confirmation already went out.
  */
-async function applyStart(deps: Deps, ctx: TurnContext, row: ClaimedMessage): Promise<boolean> {
+async function applyStart(deps: Deps, ctx: TurnContext, turn: ClaimedTurn, row: ClaimedMessage): Promise<StartResult> {
   const userId = ctx.lease.userId;
-  const resumed = await deps.db.transaction(async (tx) => {
+  const result = await deps.db.transaction(async (tx): Promise<StartResult> => {
     const now = deps.clock.now();
     // Lock the user row first, so the STOP check runs on a snapshot taken after any in-flight STOP
     // ingest (which holds this row) has committed. A bare UPDATE would wait for it too, but then
     // re-check only the user row and miss the new STOP row, unpausing a user who just opted out.
     await tx.execute(sql`select 1 from users where id = ${userId} for update`);
+    const prior = await selectRows<{ one: number }>(
+      tx,
+      sql`select 1 as one from outbound_messages where idempotency_key = ${commandKey(row.id, 0)}`,
+    );
+    if (prior.length > 0) return "already_confirmed";
     const res = await selectRows<{ resumed: boolean }>(
       tx,
       sql`update users set
@@ -360,10 +350,25 @@ async function applyStart(deps: Deps, ctx: TurnContext, row: ClaimedMessage): Pr
           returning messaging_paused_at is null as resumed`,
     );
     if (res.length === 0) throw new LeaseLostError();
-    return Boolean(res[0].resumed);
+    if (!res[0].resumed) return "superseded";
+    const written = await writeReplyIntents(
+      deps,
+      {
+        userId,
+        turnId: turn.id,
+        anchorInboundId: row.id,
+        bubbles: [START_CONFIRMATION],
+        kind: "reply",
+        keys: "command",
+        lease: ctx.lease,
+      },
+      tx,
+    );
+    if (!written.fenced) throw new LeaseLostError();
+    return "resumed";
   });
-  log.info("turn.command", { userId, inboundId: row.id, kind: "START", status: resumed ? "resumed" : "superseded" });
-  return resumed;
+  log.info("turn.command", { userId, inboundId: row.id, kind: "START", status: result });
+  return result;
 }
 
 async function loadUser(deps: Deps, userId: string): Promise<UserRow | null> {

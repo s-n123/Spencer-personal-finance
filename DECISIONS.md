@@ -244,23 +244,36 @@ Research backing is in `docs/research/` (retrieved 2026-10-29). Plan context is 
 From the M1 review:
 
 - **D-139 · The START confirmation:**
-  - It is a pause-checked `reply` intent, sent right after START applies and before the agent runs.
-  - Writing it doesn't move the turn past `claimed`.
-  - Recovery ignores the `reply:<START id>:0` key when deciding whether an orphan was committed (amends D-132), so the rest of the burst is re-run.
-  - · Reason: it is only true while the user is resumed, so a STOP that lands before it is sent must suppress it. A STOP during the model call now comes after it. A dead holder's burst must still get its question answered (D-131, D-132). The re-run is safe because `applyStart` is idempotent and the key dedupes. · active
+  - It is a pause-checked `reply` intent, keyed `command:<START id>:0`, sent right after START applies and before the agent runs.
+  - Resuming and writing it are one fenced transaction, so "applied" means "confirmed".
+  - Writing it doesn't move the turn past `claimed`. Recovery ignores `command:` keys when deciding whether an orphan was committed (amends D-132), so the rest of the burst is re-run.
+  - A re-run that finds the confirmation never re-applies START, even if a STOP arrived since.
+  - A twice-orphaned turn marks crisis, STOP and confirmed START rows done; the apology covers the rest.
+  - · Reason: it is only true while the user is resumed, so a STOP that lands before it is sent must suppress it, and a STOP during the model call now comes after it. A dead holder's burst must still get its question answered (D-131, D-132). Re-applying START in a re-run could un-pause a user who was last told "You're unsubscribed". Its own key namespace means no apology anchored on START can collide with it.
+  - Open (M6): ingest pauses on a STOP by arrival, while START compares send times. A provider that redelivers an older STOP late could still reorder them; revisit with Sendblue's redelivery behaviour.
+  - · active
 - **D-140 · Deadline aborts:**
   - The agent's signal (`ensureMedia`, `runAgent`) also fires at deadline − `sendReserveMs`.
   - Each LLM call's signal fires at deadline − `llmDeadlineMarginMs`.
   - A deadline abort while the lease is still held fails the turn with `error_code` `deadline` and the apology.
+  - An LLM call cut by its deadline is an error-level `llm.call_failed` of kind `deadline` (canned reply, `stop_reason` `error:deadline`), not a lease abort.
   - · Reason: SDK 1.3.0 honours `retry-after` up to 2^31−1 ms. Only an abort ends that sleep, and the per-attempt `timeout` doesn't bound it (completes D-035). · active
 - **D-141 · Unused photos are discarded:**
   - Photos of rows a turn ignores or fails are set to `failed` / `media_unused` with `provider_url` NULL, in `finishTurn`'s transaction. `adapter.releaseMedia(url)` is called for each after commit.
   - Rows exhausted by attempts are released the same way.
-  - A row a live downloader holds is left to that downloader.
-  - · Reason: no staged original with EXIF/GPS, and no provider photo URL, kept without a purge date (D-050, D-134). · active
-- **D-142 · Logs mask the turn modes `safety`, `care` and `command` as `handled`, and `inbound.accepted` no longer logs the STOP keyword.** · A crisis or care mode next to a user ID is consumer health data (MHMDA, D-130). Crisis copy and the STOP confirmation are both `priority` sends, so logging STOP would single out crisis copy by elimination. · active
+  - A live claim (the kick's own prefetch) is taken over too. The downloader's store and release writes are fenced on `downloading`, so they miss, and it deletes any blob it wrote.
+  - · Reason: no staged original with EXIF/GPS, and no provider photo URL, kept without a purge date (D-050, D-134). Nothing would retry a claim on an ignored row after a retryable failure.
+  - Not covered (M6): a photo and a keyword or crisis phrase in one provider event. The simulator sends them separately (D-123); a real adapter that combines them must handle it.
+  - · active
+- **D-142 · Logs don't single out the crisis path, line by line:**
+  - Turn modes `safety`, `care` and `command` are logged as `handled`.
+  - `inbound.accepted` doesn't log the STOP keyword.
+  - A successful `priority` send is logged at debug only (never printed in production); a failed one is logged without the user ID.
+  - · Reason: a crisis or care mode next to a user ID is consumer health data (MHMDA, D-130). Crisis copy and the STOP confirmation are both `priority` sends, and a paused user can only get crisis copy, so any of these lines would identify it.
+  - Residual: a user's sequence of lines (an agent turn right after a handled one, with no START) can still hint at it. Logs are treated as health-adjacent: retention and access are set in M6.
+  - · active
 - **D-143 · History also leaves out any turn whose `stop_reason` is `refusal`, not only mode `safety`. `finishTurn` keeps `safety` for a refused recovery re-run.** · D-126: a refused turn stays out of history even if it is closed under another mode. · active
-- **D-144 · `npm run dev` passes `-H 127.0.0.1` to `next dev` unless `-H`/`--hostname` is given. `npm run dev -- -H 0.0.0.0` opens it to the LAN.**
+- **D-144 · `npm run dev` passes `-H 127.0.0.1` to `next dev` unless `-H`/`--hostname` is given. `npm run dev -- -H 0.0.0.0` opens it to the LAN; `next.config.ts` adds this machine's IPv4 LAN addresses to `allowedDevOrigins`, so the page hydrates at `http://<LAN IP>:3000`.**
   - · Reason: `next dev` defaults to 0.0.0.0. The simulator exposes threads, photos, API spend and `db:reset`, and D-136's cross-site check doesn't cover direct LAN requests.
   - Not done: a Host-header allowlist on simulator routes, which would also close DNS rebinding (D-136). Small; add it if the owner wants LAN use to be safe.
   - · active

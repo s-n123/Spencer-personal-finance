@@ -9,7 +9,7 @@ import { runMigrations } from "./migrate";
 // DATABASE_URL points at it and nothing is listening yet -> migrations -> `next dev`. Ctrl-C stops
 // Next first, then closes PGlite cleanly so its data directory is never left mid-write.
 // Extra arguments go to `next dev` (npm run dev -- --port 3001). It listens on 127.0.0.1 unless
-// they set a host (npm run dev -- -H 0.0.0.0 to reach it from another device).
+// they set a host (npm run dev -- -H 0.0.0.0, then http://<LAN IP>:3000 from another device).
 
 const SHUTDOWN_GRACE_MS = 5_000;
 

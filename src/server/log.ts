@@ -46,7 +46,9 @@ const ALLOWED_FIELDS = new Set([
 /**
  * Turn modes logged as "handled": 'safety' (and M4's 'care') next to a user id would record that
  * the user hit the crisis path (MHMDA consumer health data), so every deterministic reply, a STOP
- * included, looks the same in logs (D-130).
+ * included, looks the same in logs (D-130, D-142). This covers single lines only: a user's sequence
+ * of lines (an agent turn right after a handled one, with no START) can still hint at it, so logs
+ * are treated as health-adjacent (retention and access, M6).
  */
 const MASKED_MODES = new Set(["safety", "care", "command"]);
 

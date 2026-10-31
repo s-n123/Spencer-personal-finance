@@ -14,6 +14,7 @@ import {
   type LoopInput,
   type ToolExecutor,
 } from "./loop";
+import { AnthropicLlm } from "./llm";
 import type { Message, ToolUnion } from "./types";
 
 type Content = Message["content"];
@@ -101,6 +102,52 @@ describe("callOptions", () => {
     expect(outcome).toBeInstanceOf(APIUserAbortError);
     expect(fetches).toBe(1);
     expect(lease.signal.aborted).toBe(false);
+  });
+
+  it("labels a call the deadline cut as a 'deadline' failure, logged as one, not a lease abort", async () => {
+    const lines: string[] = [];
+    const capture = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    const spies = [
+      vi.spyOn(console, "log").mockImplementation(capture),
+      vi.spyOn(console, "warn").mockImplementation(capture),
+      vi.spyOn(console, "error").mockImplementation(capture),
+    ];
+    const hanging = new Anthropic({
+      apiKey: "test-key",
+      maxRetries: 0,
+      fetch: (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        }),
+    });
+    try {
+      const deps = makeTestDeps(null as unknown as Db, { llm: new AnthropicLlm(hanging.beta.messages, false) });
+      const turn = new AbortController();
+      const result = await runLoop(deps, {
+        model: "claude-sonnet-5-5",
+        effort: "medium",
+        maxTokens: 8000,
+        userId: "8f0c7a52-3a8e-4c1e-9d55-0d2f0a3b7c11",
+        tools: [],
+        messages: [{ role: "user", content: "hi" }],
+        signal: turn.signal,
+        deadlineMs: deps.clock.now().getTime() + policy.agent.llmDeadlineMarginMs + 200,
+        maxIterations: 1,
+      });
+      expect(result.outcome.kind === "error" && result.outcome.error.kind).toBe("deadline");
+      const events = lines.flatMap((l) => {
+        try {
+          const j = JSON.parse(l) as { level: string; event: string };
+          return j.event.startsWith("llm.") ? [`${j.level}:${j.event}`] : [];
+        } catch {
+          return [];
+        }
+      });
+      expect(events).toEqual(["error:llm.call_failed"]);
+      expect(turn.signal.aborted).toBe(false);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 
   it("still follows the caller's signal", () => {

@@ -5,7 +5,7 @@ import { selectRows } from "@/server/db/sql";
 import type { Db } from "@/server/db/types";
 import type { Deps } from "@/server/deps";
 import { logError } from "@/server/errors";
-import { log } from "@/server/log";
+import { log, type LogFields } from "@/server/log";
 import { leaseFence, resolveTiming, sqlTs, type LeaseHandle, type PipelineTiming } from "./lease";
 
 // OutboundSender (PLAN §2.1 turn phases, §4). Replies are written as intents before any send and
@@ -22,6 +22,16 @@ export function replyKey(anchorInboundId: string, seq: number): string {
   return `reply:${anchorInboundId}:${seq}`;
 }
 
+/**
+ * A command's confirmation (START). Its own namespace, so a reply or apology anchored on the same
+ * row can never collide with it, and recovery can tell it apart: it doesn't commit the turn (D-139).
+ */
+export const COMMAND_KEY_PREFIX = "command:";
+
+export function commandKey(anchorInboundId: string, seq: number): string {
+  return `${COMMAND_KEY_PREFIX}${anchorInboundId}:${seq}`;
+}
+
 export interface ReplyIntentsInput {
   userId: string;
   turnId: string | null;
@@ -30,6 +40,8 @@ export interface ReplyIntentsInput {
   bubbles: string[];
   kind: OutboundKind;
   lease: LeaseHandle;
+  /** "command" keys the intents command:<anchor>:<i> (a command's confirmation). */
+  keys?: "reply" | "command";
 }
 
 export interface WriteIntentsResult {
@@ -50,8 +62,9 @@ export async function writeReplyIntents(
     const rows = await selectRows<{ ok: number }>(db, sql`${fence}`);
     return { fenced: rows.length > 0, inserted: 0 };
   }
+  const keyOf = input.keys === "command" ? commandKey : replyKey;
   const values = sql.join(
-    input.bubbles.map((text, i) => sql`(${i}::int, ${text}::text, ${replyKey(input.anchorInboundId, i)}::text)`),
+    input.bubbles.map((text, i) => sql`(${i}::int, ${text}::text, ${keyOf(input.anchorInboundId, i)}::text)`),
     sql`, `,
   );
   const rows = await selectRows<{ fenced: unknown; inserted: unknown }>(
@@ -180,7 +193,7 @@ export async function sendIntent(
     }
   } catch (err) {
     // A throw or timeout is ambiguous: the provider may have sent it. Never auto-resent.
-    logError("outbound.send_threw", err, { userId: row.user_id, outboundId, kind: row.kind });
+    logError("outbound.send_threw", err, sendLogFields(row, outboundId));
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     result = { status: "unknown", errorCode: timedOut ? "timeout" : "send_threw" };
   }
@@ -195,6 +208,19 @@ export async function sendIntent(
       sentAt: status === "sent" ? deps.clock.now() : null,
     })
     .where(and(eq(outboundMessages.id, outboundId), eq(outboundMessages.status, "sending")));
-  log.info("outbound.result", { userId: row.user_id, outboundId, kind: row.kind, status });
+  const fields = { ...sendLogFields(row, outboundId), status };
+  if (row.kind !== "priority") log.info("outbound.result", fields);
+  else if (status === "sent") log.debug("outbound.result", fields);
+  else log.warn("outbound.result", fields);
   return status;
+}
+
+/**
+ * A priority send is crisis copy or the STOP confirmation, and a paused user can only get crisis
+ * copy (one STOP confirmation per pause). So a priority line next to a user id would reveal the
+ * crisis path (D-142): a successful one is debug only (production never prints it; the row has the
+ * status), and a problem is logged without the user id. The outbound id joins to the DB.
+ */
+function sendLogFields(row: { user_id: string; kind: string }, outboundId: string): LogFields {
+  return row.kind === "priority" ? { outboundId, kind: row.kind } : { userId: row.user_id, outboundId, kind: row.kind };
 }

@@ -10,6 +10,7 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 afterEach(() => {
   vi.doUnmock("@next/env");
+  vi.doUnmock("node:os");
   vi.resetModules();
 });
 
@@ -66,6 +67,22 @@ describe("next.config", () => {
   it("hides the dev indicator, which covers the simulator's attach button at phone width", async () => {
     const { default: config } = await import("../next.config");
     expect(config.devIndicators).toBe(false);
+  });
+
+  it("allows this machine's LAN addresses as dev origins, so the documented -H 0.0.0.0 hydrates on a phone", async () => {
+    vi.doMock("node:os", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("node:os")>()),
+      networkInterfaces: () => ({
+        lo: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+        en0: [
+          { address: "192.0.2.20", family: "IPv4", internal: false },
+          { address: "fe80::1", family: "IPv6", internal: false },
+        ],
+      }),
+    }));
+    const { default: config } = await import("../next.config");
+    expect(config.allowedDevOrigins).toEqual(["127.0.0.1", "192.0.2.20"]);
+    expect(readFileSync(join(ROOT, "README.md"), "utf8")).toContain("npm run dev -- -H 0.0.0.0");
   });
 });
 

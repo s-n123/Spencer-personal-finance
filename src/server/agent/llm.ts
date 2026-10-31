@@ -3,7 +3,7 @@ import { getEnv, type Env } from "@/server/config/env";
 import { policy } from "@/server/config/policy";
 import { logError } from "@/server/errors";
 import { log } from "@/server/log";
-import { toLlmCallError } from "./errors";
+import { LlmCallError, toLlmCallError } from "./errors";
 import { OfflineDemoLlm } from "./offline-llm";
 import type { LlmCallOptions, LlmClient, LlmRequest, Message, MessageParams } from "./types";
 
@@ -57,6 +57,12 @@ export class AnthropicLlm implements LlmClient {
       });
     } catch (err) {
       const mapped = toLlmCallError(err);
+      if (mapped.kind === "aborted" && isDeadlineAbort(opts.signal)) {
+        // The deadline half of the call's signal fired, not a lease loss: a failure (D-140).
+        const cut = new LlmCallError("deadline", { retryable: false });
+        logError("llm.call_failed", cut, { model: params.model });
+        throw cut;
+      }
       if (mapped.kind === "aborted") {
         log.info("llm.call_aborted", { model: params.model });
       } else if (mapped.kind === "spend_cap") {
@@ -68,6 +74,12 @@ export class AnthropicLlm implements LlmClient {
       throw mapped;
     }
   }
+}
+
+/** AbortSignal.timeout's reason (passed on by AbortSignal.any); a lease loss aborts with LeaseLostError. */
+function isDeadlineAbort(signal: AbortSignal): boolean {
+  const reason: unknown = signal.reason;
+  return reason instanceof DOMException && reason.name === "TimeoutError";
 }
 
 /** LLM_PROVIDER=fake gives the deterministic offline model (DECISIONS D-120); otherwise the API. */

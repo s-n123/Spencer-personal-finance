@@ -224,7 +224,7 @@ describe("ingest", () => {
     expect(deps.adapter.released.sort()).toEqual(["sim-inbox:while-paused", "sim-inbox:with-stop"]);
   });
 
-  it("logs a crisis message exactly like a STOP, so no log line singles out the crisis path", async () => {
+  it("logs a crisis message like a STOP, line by line, even for a paused user (D-142)", async () => {
     const lines: Record<string, unknown>[] = [];
     const capture = (...args: unknown[]) => {
       try {
@@ -233,7 +233,8 @@ describe("ingest", () => {
         // not a log line
       }
     };
-    vi.stubEnv("LOG_LEVEL", "debug");
+    // Info, the production default (debug is refused there).
+    vi.stubEnv("LOG_LEVEL", "info");
     resetEnvForTests();
     const spies = [
       vi.spyOn(console, "log").mockImplementation(capture),
@@ -247,12 +248,22 @@ describe("ingest", () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       return lines.map(({ userId, inboundId, outboundId, turnId, ...rest }) => rest);
     };
+    const THIRD = "+12015550177";
     try {
       const stop = await shape(PHONE, "STOP");
       const crisis = await shape(OTHER, "I want to kill myself");
       expect(crisis.length).toBeGreaterThan(2);
       expect(crisis).toEqual(stop);
       expect(JSON.stringify(crisis)).not.toMatch(/safety|STOP/);
+
+      // While paused, the only priority send a user can get is crisis copy (one STOP confirmation
+      // per pause), so it must not add a line either.
+      await shape(THIRD, "STOP");
+      deps.clock.advance(60_000);
+      const repeatStop = await shape(PHONE, "STOP");
+      const pausedCrisis = await shape(THIRD, "I want to kill myself");
+      expect(deps.adapter.textsTo(THIRD)).toHaveLength(2);
+      expect(pausedCrisis).toEqual(repeatStop);
     } finally {
       for (const s of spies) s.mockRestore();
       vi.unstubAllEnvs();

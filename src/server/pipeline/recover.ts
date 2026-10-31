@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { inboundMessages, turns } from "@/server/db/schema";
+import { inboundMessages, outboundMessages, turns } from "@/server/db/schema";
 import { selectRows } from "@/server/db/sql";
 import type { Deps } from "@/server/deps";
 import { log } from "@/server/log";
 import { claimedMessageColumns, insertTurn, messageOrder, type ClaimedTurn, type TurnMode } from "./claim";
+import type { ClaimedMessage } from "./contracts";
 import { holdsLease, LeaseLostError, leaseFence } from "./lease";
-import { replyKey, sendPending } from "./outbound";
+import { COMMAND_KEY_PREFIX, commandKey, sendPending } from "./outbound";
 import { failTurn, finishTurn, runTurn, type TurnContext } from "./router";
 
 // Orphaned-turn recovery (PLAN §2.1 turn semantics; D-044). Runs right after ACQUIRE: every live
@@ -27,14 +28,12 @@ export async function recoverOrphanedTurns(deps: Deps, ctx: TurnContext): Promis
   for (const orphan of orphans) {
     const mode = orphan.mode as TurnMode;
     log.info("turn.recovering", { userId, turnId: orphan.id, status: orphan.status, mode });
-    const rows = await processingRows(deps, orphan.id);
-    // A START confirmation is written before the agent runs and doesn't commit the turn: the re-run
-    // repeats it idempotently (applyStart is, and the intent key dedupes).
-    const confirmations = rows.filter((r) => r.keyword === "START").map((r) => sql`${replyKey(r.id, 0)}`);
+    // A command's confirmation (START) is written before the agent runs and doesn't commit the
+    // turn: the re-run finds it and skips the command (D-139).
     const [{ total }] = await selectRows<{ total: unknown }>(
       deps.db,
-      sql`select count(*) as total from outbound_messages where turn_id = ${orphan.id}
-          ${confirmations.length > 0 ? sql`and idempotency_key not in (${sql.join(confirmations, sql`, `)})` : sql``}`,
+      sql`select count(*) as total from outbound_messages
+          where turn_id = ${orphan.id} and idempotency_key not like ${`${COMMAND_KEY_PREFIX}%`}`,
     );
 
     if (Number(total) > 0 || orphan.status !== "claimed") {
@@ -42,10 +41,20 @@ export async function recoverOrphanedTurns(deps: Deps, ctx: TurnContext): Promis
       continue;
     }
 
+    const rows = await processingRows(deps, orphan.id);
     const turn: ClaimedTurn = { id: orphan.id, clockAt: orphan.clockAt, mode, messages: rows };
     if (mode === "recovery") {
-      // Already re-run once and orphaned again: stop retrying and tell the user.
-      await failTurn(deps, ctx, turn, rows, "orphaned_twice");
+      // Already re-run once and orphaned again: stop retrying and tell the user. Rows already
+      // answered (crisis copy, the STOP confirmation, a confirmed START) are done; the apology
+      // covers the rest.
+      const confirmed = await confirmedStarts(deps, rows);
+      const answered = rows.filter((r) => r.crisisKind || r.keyword === "STOP" || confirmed.has(r.id));
+      const rest = rows.filter((r) => !answered.includes(r));
+      await failTurn(deps, ctx, turn, rest, "orphaned_twice", {
+        done: answered.map((r) => r.id),
+        ignored: [],
+        failed: [],
+      });
       continue;
     }
     const rerun = await moveToRecoveryTurn(deps, ctx, turn);
@@ -70,6 +79,18 @@ async function closeCommitted(deps: Deps, ctx: TurnContext, turnId: string, mode
   await sendPending(deps, ctx.lease.userId, { owner: ctx.lease, timing: ctx.timing });
   const rows = await processingRows(deps, turnId);
   await finishTurn(deps, ctx, { id: turnId, mode }, { done: rows.map((r) => r.id), ignored: [], failed: [] }, mode, "done");
+}
+
+/** START rows whose resume took effect (their confirmation intent exists). */
+async function confirmedStarts(deps: Deps, rows: ClaimedMessage[]): Promise<Set<string>> {
+  const starts = rows.filter((r) => r.keyword === "START");
+  if (starts.length === 0) return new Set();
+  const keys = new Map(starts.map((r) => [commandKey(r.id, 0), r.id]));
+  const found = await deps.db
+    .select({ key: outboundMessages.idempotencyKey })
+    .from(outboundMessages)
+    .where(inArray(outboundMessages.idempotencyKey, [...keys.keys()]));
+  return new Set(found.map((f) => keys.get(f.key)).filter((id): id is string => id !== undefined));
 }
 
 function processingRows(deps: Deps, turnId: string) {
