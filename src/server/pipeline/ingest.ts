@@ -110,12 +110,14 @@ export async function ingestMessage(
 
     // No crisis kind here: an inferred health category tied to a user id is consumer health data
     // (MHMDA) and doesn't belong in logs. It lives only on the row (and in safety_events from M4).
+    // Nor STOP: crisis copy and the STOP confirmation are both priority sends, and naming one
+    // trigger would single out the other.
     log.info("inbound.accepted", {
       userId: user.id,
       inboundId,
       provider: msg.provider,
       count: msg.media.length,
-      kind: screen.keyword ?? undefined,
+      kind: screen.keyword === "STOP" ? undefined : (screen.keyword ?? undefined),
     });
     return { status: "accepted", userId: user.id, inboundId, mediaIds };
   });

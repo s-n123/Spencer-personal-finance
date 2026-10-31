@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadHistory } from "@/server/agent/history";
 import type { InboundMedia, NormalizedEvent } from "@/server/channels/types";
 import { resetEnvForTests } from "@/server/config/env";
 import { inboundMessages, media, outboundMessages, turns, users, userTurnState } from "@/server/db/schema";
@@ -16,8 +17,8 @@ import type { AgentTurnInput, AgentTurnOutput, PipelineHandlers } from "./contra
 import { handleInboundEvents } from "./inbound";
 import { ingestMessage } from "./ingest";
 import { kick } from "./kick";
-import { resolveTiming, tryAcquireLease } from "./lease";
-import { writeReplyIntents } from "./outbound";
+import { LeaseLostError, resolveTiming, tryAcquireLease } from "./lease";
+import { PAUSE_EXEMPT_KINDS, writeReplyIntents } from "./outbound";
 
 // Ingest -> kick -> router on PGlite with a fake clock. PGlite serializes everything, so true races
 // live in kick.pg.test.ts; here kicks still interleave at every await.
@@ -206,6 +207,57 @@ describe("ingest", () => {
     await runner.flush();
     expect(prefetched).toEqual([]);
     expect(agentCalls).toHaveLength(0);
+  });
+
+  it("photos on rows the router ignores are discarded and their staged originals released", async () => {
+    // One in a STOP burst, one sent while paused (D-050: no raw original with EXIF is kept).
+    await send(message(null, { media: [{ url: "sim-inbox:with-stop" }] }), message("STOP"));
+    await runner.flush();
+    deps.clock.advance(60_000);
+    await send(message(null, { media: [{ url: "sim-inbox:while-paused" }] }));
+    await runner.flush();
+    const rows = await deps.db.select().from(media);
+    expect(rows.map((m) => [m.status, m.providerUrl, m.errorCode])).toEqual([
+      ["failed", null, "media_unused"],
+      ["failed", null, "media_unused"],
+    ]);
+    expect(deps.adapter.released.sort()).toEqual(["sim-inbox:while-paused", "sim-inbox:with-stop"]);
+  });
+
+  it("logs a crisis message exactly like a STOP, so no log line singles out the crisis path", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const capture = (...args: unknown[]) => {
+      try {
+        lines.push(JSON.parse(args.map(String).join(" ")) as Record<string, unknown>);
+      } catch {
+        // not a log line
+      }
+    };
+    vi.stubEnv("LOG_LEVEL", "debug");
+    resetEnvForTests();
+    const spies = [
+      vi.spyOn(console, "log").mockImplementation(capture),
+      vi.spyOn(console, "warn").mockImplementation(capture),
+      vi.spyOn(console, "error").mockImplementation(capture),
+    ];
+    const shape = async (phone: string, text: string) => {
+      lines.length = 0;
+      await send(message(text, { phone }));
+      await runner.flush();
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      return lines.map(({ userId, inboundId, outboundId, turnId, ...rest }) => rest);
+    };
+    try {
+      const stop = await shape(PHONE, "STOP");
+      const crisis = await shape(OTHER, "I want to kill myself");
+      expect(crisis.length).toBeGreaterThan(2);
+      expect(crisis).toEqual(stop);
+      expect(JSON.stringify(crisis)).not.toMatch(/safety|STOP/);
+    } finally {
+      for (const s of spies) s.mockRestore();
+      vi.unstubAllEnvs();
+      resetEnvForTests();
+    }
   });
 
   it("never logs message text or the crisis kind", async () => {
@@ -402,10 +454,12 @@ describe("turns", () => {
         usage: [
           {
             latencyMs: 900,
+            model: "claude-sonnet-5-5",
             inputTokens: 10,
             outputTokens: 5,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
+            cacheWrite1hTokens: 0,
             stopReason: "end_turn",
           },
         ],
@@ -556,6 +610,58 @@ describe("STOP and START", () => {
     const u = await userByPhone();
     const replies = (await outbound(u.id)).filter((o) => o.kind === "reply");
     expect(replies.map((o) => o.status)).toEqual(["sent", "suppressed"]);
+  });
+
+  it("START is confirmed before the agent runs, so a STOP during the model call has the last word", async () => {
+    await send(message("STOP"));
+    await runner.flush();
+    deps.clock.advance(60_000);
+    let sentBeforeAgent: string[] = [];
+    deps.pipeline = recordingHandlers({
+      runAgent: async (_d, input) => {
+        agentCalls.push(input);
+        sentBeforeAgent = deps.adapter.textsTo(PHONE);
+        await handleInboundEvents(deps, [message("STOP")]);
+        return agentReply(["have some rice"]);
+      },
+    });
+    await send(message("START"));
+    deps.clock.advance(1_000);
+    await send(message("what should I eat?"));
+    await runner.flush();
+    expect(sentBeforeAgent).toEqual([STOP_CONFIRMATION, START_CONFIRMATION]);
+    expect(deps.adapter.textsTo(PHONE)).toEqual([STOP_CONFIRMATION, START_CONFIRMATION, STOP_CONFIRMATION]);
+    const u = await userByPhone();
+    expect(u.messagingPausedAt).not.toBeNull();
+    // Only true while the user is resumed, so it is pause-checked like any reply.
+    const confirmation = (await outbound(u.id)).find((o) => o.text === START_CONFIRMATION);
+    expect(PAUSE_EXEMPT_KINDS).not.toContain(confirmation?.kind);
+  });
+
+  it("a holder that dies after confirming START leaves the rest of the burst to recovery, not dropped", async () => {
+    await send(message("STOP"));
+    await runner.flush();
+    deps.clock.advance(60_000);
+    deps.pipeline = recordingHandlers({
+      runAgent: async (d, input) => {
+        agentCalls.push(input);
+        // The first holder dies in the model call and its lease lapses.
+        if (agentCalls.length === 1) throw new LeaseLostError();
+        return stubHandlers().runAgent(d, input);
+      },
+    });
+    await send(message("START"));
+    deps.clock.advance(1_000);
+    await send(message("what should I eat?"));
+    await runner.flush();
+    expect(deps.adapter.textsTo(PHONE)).toEqual([STOP_CONFIRMATION, START_CONFIRMATION]);
+
+    deps.clock.advance(timing.leaseTtlMs + 1);
+    await kick(deps, (await userByPhone()).id);
+    expect(agentCalls).toHaveLength(2);
+    expect(deps.adapter.textsTo(PHONE)).toEqual([STOP_CONFIRMATION, START_CONFIRMATION, "got 1 message(s)"]);
+    const rows = await deps.db.select().from(inboundMessages).orderBy(asc(inboundMessages.receivedAt));
+    expect(rows.map((r) => r.status)).toEqual(["done", "done", "done"]);
   });
 });
 
@@ -712,6 +818,50 @@ describe("recovery, sweep and handoff", () => {
     expect(deps.adapter.textsTo(PHONE)).toEqual(["got 1 message(s)"]);
     const [done] = await deps.db.select().from(inboundMessages);
     expect(done.status).toBe("done");
+  });
+
+  it("a refused recovery re-run stays a safety turn, so it never re-enters history", async () => {
+    deps.pipeline = recordingHandlers({
+      runAgent: async (_d, input) => {
+        agentCalls.push(input);
+        return { ...agentReply(["refusal copy"]), mode: "safety", stopReason: "refusal" };
+      },
+    });
+    const { userId, turn } = await orphanTurn("something the model refuses");
+    deps.clock.advance(timing.leaseTtlMs + 1);
+    await kick(deps, userId);
+    const rerun = (await deps.db.select().from(turns)).find((x) => x.id !== turn.id);
+    expect([rerun?.status, rerun?.mode, rerun?.stopReason]).toEqual(["done", "safety", "refusal"]);
+    expect(await loadHistory(deps.db, { userId, turnId: randomUUID(), excludeInboundIds: [] })).toEqual([]);
+  });
+
+  it("aborts the agent at the deadline less the send reserve, and still answers", async () => {
+    deps.pipeline = recordingHandlers({
+      runAgent: async (_d, input) => {
+        agentCalls.push(input);
+        // Like the SDK's retry-after sleep: only the signal ends it.
+        return new Promise<never>((_, reject) => {
+          const stuck = setTimeout(() => reject(new Error("the deadline never aborted the agent")), 2_000);
+          input.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(stuck);
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    await send(message("hi"));
+    runner.drop();
+    const userId = (await userByPhone()).id;
+    // 50 ms of agent budget once the debounce is over.
+    const deadlineMs = deps.clock.now().getTime() + timing.debounceMs + timing.sendReserveMs + 50;
+    await kick(deps, userId, { deadlineMs, timing: { minTurnBudgetMs: 0 } });
+    expect(deps.adapter.textsTo(PHONE)).toEqual([TURN_FAILED_REPLY]);
+    const [turn] = await deps.db.select().from(turns);
+    expect([turn.status, turn.errorCode]).toEqual(["failed", "deadline"]);
   });
 
   it("gives up on a turn orphaned twice and apologizes", async () => {

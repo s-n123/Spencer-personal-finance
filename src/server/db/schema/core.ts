@@ -102,11 +102,29 @@ export const turns = pgTable(
 
 export interface TurnIterationUsage {
   latencyMs: number;
+  /** The model that produced the response: after a server-side fallback, not the one requested. */
+  model: string | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** The 1 h share of cacheWriteTokens (billed above 5 m writes). */
+  cacheWrite1hTokens: number;
   stopReason: string | null;
+  /**
+   * A fallback-served response only: every billed attempt, the declined one included. The counts
+   * above then cover just the attempt that produced the message.
+   */
+  attempts?: TurnAttemptUsage[];
+}
+
+export interface TurnAttemptUsage {
+  type: string;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export const inboundMessages = pgTable(

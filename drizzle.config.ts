@@ -1,4 +1,9 @@
+import { loadEnvConfig } from "@next/env";
 import { defineConfig } from "drizzle-kit";
+
+// drizzle-kit runs outside tsx and scripts/_env.ts, so it loads .env.local the same way itself
+// (D-125). The import must be named: a default import is undefined under drizzle-kit's loader.
+loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production");
 
 // drizzle-kit 0.31 (pinned). Migrations always go to the unpooled URL.
 export default defineConfig({

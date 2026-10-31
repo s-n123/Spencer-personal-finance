@@ -466,6 +466,8 @@ describe("ensureMedia", () => {
       providerUrl: null,
     });
     expect(await row(pending.id)).toMatchObject({ status: "failed", providerUrl: null });
+    // Their staged originals (which still have EXIF) are released, not orphaned (D-134).
+    expect(deps.adapter.released.sort()).toEqual([stale.url, pending.url].sort());
     expect(deps.sleeper.calls).toEqual([]);
   });
 

@@ -45,8 +45,29 @@ export async function createPgTestDb(opts: { poolSize?: number } = {}): Promise<
       await pool.end();
       const cleanup = new pg.Client({ connectionString: adminUrl });
       await cleanup.connect();
-      await cleanup.query(`drop database if exists ${name} with (force)`);
-      await cleanup.end();
+      try {
+        await waitForBackendsToExit(cleanup, name);
+        await cleanup.query(`drop database if exists ${name} with (force)`);
+      } finally {
+        await cleanup.end();
+      }
     },
   };
+}
+
+/**
+ * pool.end() resolves once its clients are told to end, not once their connections have closed
+ * (pg-pool doesn't await client.end()). A forced drop would terminate them mid-close, and the FATAL
+ * 57P01 then surfaces as an unhandled error that fails the run. Bounded: the drop still forces.
+ */
+async function waitForBackendsToExit(admin: pg.Client, database: string, timeoutMs = 5_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const res = await admin.query<{ n: number }>(
+      "select count(*)::int as n from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()",
+      [database],
+    );
+    if (res.rows[0].n === 0) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }

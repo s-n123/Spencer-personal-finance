@@ -6,7 +6,7 @@ import type { Deps } from "@/server/deps";
 import { log } from "@/server/log";
 import { claimedMessageColumns, insertTurn, messageOrder, type ClaimedTurn, type TurnMode } from "./claim";
 import { holdsLease, LeaseLostError, leaseFence } from "./lease";
-import { sendPending } from "./outbound";
+import { replyKey, sendPending } from "./outbound";
 import { failTurn, finishTurn, runTurn, type TurnContext } from "./router";
 
 // Orphaned-turn recovery (PLAN §2.1 turn semantics; D-044). Runs right after ACQUIRE: every live
@@ -27,9 +27,14 @@ export async function recoverOrphanedTurns(deps: Deps, ctx: TurnContext): Promis
   for (const orphan of orphans) {
     const mode = orphan.mode as TurnMode;
     log.info("turn.recovering", { userId, turnId: orphan.id, status: orphan.status, mode });
+    const rows = await processingRows(deps, orphan.id);
+    // A START confirmation is written before the agent runs and doesn't commit the turn: the re-run
+    // repeats it idempotently (applyStart is, and the intent key dedupes).
+    const confirmations = rows.filter((r) => r.keyword === "START").map((r) => sql`${replyKey(r.id, 0)}`);
     const [{ total }] = await selectRows<{ total: unknown }>(
       deps.db,
-      sql`select count(*) as total from outbound_messages where turn_id = ${orphan.id}`,
+      sql`select count(*) as total from outbound_messages where turn_id = ${orphan.id}
+          ${confirmations.length > 0 ? sql`and idempotency_key not in (${sql.join(confirmations, sql`, `)})` : sql``}`,
     );
 
     if (Number(total) > 0 || orphan.status !== "claimed") {
@@ -37,7 +42,6 @@ export async function recoverOrphanedTurns(deps: Deps, ctx: TurnContext): Promis
       continue;
     }
 
-    const rows = await processingRows(deps, orphan.id);
     const turn: ClaimedTurn = { id: orphan.id, clockAt: orphan.clockAt, mode, messages: rows };
     if (mode === "recovery") {
       // Already re-run once and orphaned again: stop retrying and tell the user.

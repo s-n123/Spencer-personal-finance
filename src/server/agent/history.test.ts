@@ -161,25 +161,27 @@ describe("loadHistory", () => {
 });
 
 describe("loadHistory and refused turns", () => {
-  async function turnWithMode(minute: number, mode: string): Promise<string> {
+  async function turnWithMode(minute: number, mode: string, stopReason: string | null = "refusal"): Promise<string> {
     const [row] = await db
       .insert(turns)
-      .values({ userId, clockAt: at(minute), startedAt: at(minute), status: "done", mode })
+      .values({ userId, clockAt: at(minute), startedAt: at(minute), status: "done", mode, stopReason })
       .returning({ id: turns.id });
     return row.id;
   }
 
   it.each([
-    ["finished as a safety turn", "safety"],
-    // Recovery closes a reply_written orphan under its claim-time mode.
-    ["finished by recovery under its claim-time mode", "agent"],
-  ])("leaves out a turn answered only by the refusal copy (%s)", async (_name, mode) => {
+    ["marked safety at commit", "safety", "refusal"],
+    ["marked safety, any stop reason", "safety", null],
+    // A turn closed under another mode (e.g. a recovery re-run) is still a refusal.
+    ["closed as a recovery turn", "recovery", "refusal"],
+  ])("leaves out a turn answered by the refusal copy (%s)", async (_name, mode, stopReason) => {
     const t1 = await turn(1);
     await inbound(t1, 1, { text: "hi" });
     await outbound(t1, "Hey!");
-    const refused = await turnWithMode(2, mode);
+    const refused = await turnWithMode(2, mode, stopReason);
     await inbound(refused, 2, { text: "declined question" });
-    await outbound(refused, "refusal copy", { kind: "safety" });
+    // Refusal copy goes out as an ordinary reply (D-126).
+    await outbound(refused, "refusal copy");
     const current = await turn(3);
     const currentInbound = await inbound(current, 3, { text: "next question", status: "processing" });
 
@@ -197,7 +199,7 @@ describe("loadHistory and refused turns", () => {
     await outbound(t1, "Hey!");
     const refused = await turnWithMode(2, "safety");
     await inbound(refused, 2, { text: "declined question" });
-    await outbound(refused, "refusal copy", { kind: "safety" });
+    await outbound(refused, "refusal copy");
     const current = await turn(3);
     expect(await loadHistory(db, { userId, turnId: current, excludeInboundIds: [], exchanges: 1 })).toEqual([
       { role: "user", content: "hi" },

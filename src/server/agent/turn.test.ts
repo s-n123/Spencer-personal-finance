@@ -204,7 +204,16 @@ describe("runAgent request shape", () => {
       stopReason: "end_turn",
       refusalCategory: null,
       usage: [
-        { latencyMs: 0, inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: "end_turn" },
+        {
+          latencyMs: 0,
+          model: "claude-sonnet-5-5",
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cacheWrite1hTokens: 0,
+          stopReason: "end_turn",
+        },
       ],
       mediaSummaries: [
         { mediaId: images[0].mediaId, summary: "[photo 12:29]", kind: null },
@@ -289,8 +298,88 @@ describe("runAgent request shape", () => {
     });
     const out = await runAgent(deps, input({ messages: [await claimed("hi")] }));
     expect(out.usage).toEqual([
-      { latencyMs: 1_234, inputTokens: 50, outputTokens: 7, cacheReadTokens: 900, cacheWriteTokens: 40, stopReason: "end_turn" },
+      {
+        latencyMs: 1_234,
+        model: "claude-sonnet-5-5",
+        inputTokens: 50,
+        outputTokens: 7,
+        cacheReadTokens: 900,
+        cacheWriteTokens: 40,
+        cacheWrite1hTokens: 0,
+        stopReason: "end_turn",
+      },
     ]);
+  });
+
+  it("records every billed attempt and the serving model of a fallback-served response", async () => {
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    const cache = { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2_000 };
+    deps.llm.push(
+      response([{ type: "text", text: "Done.", citations: null }], "end_turn", {
+        model: "claude-sonnet-5",
+        usage: {
+          input_tokens: 400,
+          output_tokens: 50,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 2_000,
+          cache_creation: cache,
+          iterations: [
+            {
+              type: "message",
+              model: "claude-sonnet-5-5",
+              input_tokens: 2_400,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 2_000,
+              cache_creation: cache,
+            },
+            {
+              type: "fallback_message",
+              model: "claude-sonnet-5",
+              input_tokens: 400,
+              output_tokens: 50,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_creation: null,
+            },
+          ],
+        },
+      }),
+    );
+    const out = await runAgent(deps, input({ messages: [await claimed("hi")] }));
+    expect(out.usage).toEqual([
+      {
+        latencyMs: 0,
+        model: "claude-sonnet-5",
+        inputTokens: 400,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 2_000,
+        cacheWrite1hTokens: 2_000,
+        stopReason: "end_turn",
+        attempts: [
+          {
+            type: "message",
+            model: "claude-sonnet-5-5",
+            inputTokens: 2_400,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 2_000,
+          },
+          {
+            type: "fallback_message",
+            model: "claude-sonnet-5",
+            inputTokens: 400,
+            outputTokens: 50,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        ],
+      },
+    ]);
+    const served = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.event === "llm.fallback_served");
+    expect(served).toEqual({ level: "info", event: "llm.fallback_served", userId: user.id, model: "claude-sonnet-5" });
   });
 });
 

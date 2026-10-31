@@ -43,6 +43,13 @@ const ALLOWED_FIELDS = new Set([
   "model",
 ]);
 
+/**
+ * Turn modes logged as "handled": 'safety' (and M4's 'care') next to a user id would record that
+ * the user hit the crisis path (MHMDA consumer health data), so every deterministic reply, a STOP
+ * included, looks the same in logs (D-130).
+ */
+const MASKED_MODES = new Set(["safety", "care", "command"]);
+
 type Level = "debug" | "info" | "warn" | "error";
 const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
@@ -61,6 +68,10 @@ export function filterFields(fields: LogFields | undefined): Record<string, stri
   if (!fields) return out;
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined || !ALLOWED_FIELDS.has(key)) continue;
+    if (key === "mode" && typeof value === "string" && MASKED_MODES.has(value)) {
+      out[key] = "handled";
+      continue;
+    }
     // Strings are capped so an allowlisted field can't smuggle a message body.
     out[key] = typeof value === "string" ? value.slice(0, 120) : value;
   }

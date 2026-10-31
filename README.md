@@ -15,7 +15,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open http://localhost:3000/dev/chat. It's an iMessage-style simulator using fictional numbers (`+1 201 555 01XX`). `npm run dev` starts a local PGlite database on 127.0.0.1:54330 and runs migrations, so you don't need to install Postgres.
+Open http://localhost:3000/dev/chat. It's an iMessage-style simulator using fictional numbers (`+1 201 555 01XX`). `npm run dev` starts a local PGlite database on 127.0.0.1:54330 and runs migrations, so you don't need to install Postgres. The dev server listens on 127.0.0.1 only; `npm run dev -- -H 0.0.0.0` opens it to your network (anyone on it can then use the simulator and your API key).
 
 To get real replies, set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic` in `.env.local`.
 

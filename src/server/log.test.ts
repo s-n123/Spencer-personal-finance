@@ -160,6 +160,11 @@ describe("log allowlist", () => {
     expect(filterFields({ reason: "x".repeat(500) }).reason).toHaveLength(120);
   });
 
+  it("logs crisis, care and command turn modes alike, so none names the crisis path", () => {
+    const modes = ["safety", "care", "command", "agent", "recovery"].map((mode) => filterFields({ mode }).mode);
+    expect(modes).toEqual(["handled", "handled", "handled", "agent", "recovery"]);
+  });
+
   it("respects LOG_LEVEL", () => {
     vi.stubEnv("LOG_LEVEL", "warn");
     resetEnvForTests();

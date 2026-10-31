@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -86,5 +87,54 @@ describe("repo hygiene", () => {
         });
     }
     expect(violations, "use a fictional +1 NPA 555-01XX number instead").toEqual([]);
+  });
+});
+
+/** JPEG, PNG, GIF, RIFF/WebP, ISO-BMFF (HEIC, HEIF, AVIF, MOV) and TIFF/DNG signatures. */
+function isImage(head: Buffer): boolean {
+  const hex = head.toString("hex");
+  const ascii = head.toString("latin1");
+  return (
+    /^(ffd8ff|89504e47|47494638|49492a00|4d4d002a)/.test(hex) ||
+    (ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP") ||
+    ascii.slice(4, 8) === "ftyp"
+  );
+}
+
+describe("owner photo fixtures (D-003)", () => {
+  const git = (args: string[]) => spawnSync("git", args, { cwd: ROOT, encoding: "utf8" });
+  const inRepo = git(["rev-parse", "--is-inside-work-tree"]).stdout?.trim() === "true";
+
+  it.runIf(inRepo)("are gitignored whatever the extension's case, except under fixtures/synthetic/", () => {
+    const owner = ["IMG_0001.JPG", "IMG_0002.jpg", "a.JPEG", "a.PNG", "a.HEIC", "a.heif", "a.HEIF", "a.webp"]
+      .concat(["a.GIF", "a.avif", "a.TIF", "a.tiff", "a.DNG", "a.MOV"])
+      .map((name) => `fixtures/meals/${name}`);
+    const kept = ["fixtures/synthetic/label.png", "fixtures/synthetic/menu.JPG", "fixtures/meals/expected.json"];
+    // ignorecase off, as on Linux CI: macOS clones default it on, which would hide a case-sensitive rule.
+    const res = git(["-c", "core.ignorecase=false", "check-ignore", "--no-index", "--", ...owner, ...kept]);
+    expect(res.stdout.split("\n").filter(Boolean).sort()).toEqual([...owner].sort());
+  });
+
+  it.runIf(inRepo)("no tracked file under fixtures/ outside fixtures/synthetic/ is an image", () => {
+    const tracked = git(["ls-files", "-z", "--", "fixtures"]).stdout.split("\0").filter(Boolean);
+    const images = tracked.filter(
+      (f) =>
+        !f.startsWith("fixtures/synthetic/") &&
+        existsSync(join(ROOT, f)) &&
+        isImage(readFileSync(join(ROOT, f)).subarray(0, 16)),
+    );
+    expect(images, "owner photos must stay out of the public repo").toEqual([]);
+  });
+
+  it("the image detector recognises the formats phones export", () => {
+    const heic = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic")]);
+    const webp = Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 ", "latin1");
+    expect([Buffer.from("ffd8ffe1", "hex"), Buffer.from("89504e470d0a1a0a", "hex"), heic, webp].map(isImage)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(isImage(Buffer.from('{"expected": 1}'))).toBe(false);
   });
 });

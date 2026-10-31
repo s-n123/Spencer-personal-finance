@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
+import { and, eq, lt, or, sql } from "drizzle-orm";
 import type { Provider } from "@/server/channels/types";
 import { policy } from "@/server/config/policy";
 import { media } from "@/server/db/schema";
@@ -176,7 +176,7 @@ async function discardUnclaimedBlob(deps: Deps, claim: Claim): Promise<void> {
 }
 
 /** Lets the adapter drop a staged original once nothing will download it again. */
-async function releaseSource(deps: Deps, claim: Claim): Promise<void> {
+async function releaseSource(deps: Deps, claim: Pick<Claim, "id" | "userId" | "providerUrl" | "provider">): Promise<void> {
   if (!claim.providerUrl) return;
   try {
     await adapterFor(deps, claim.provider).releaseMedia?.(claim.providerUrl);
@@ -246,26 +246,28 @@ async function failExhausted(deps: Deps, rows: TurnMediaRow[]): Promise<void> {
   const now = deps.clock.now();
   const ids = rows.filter((r) => isOpen(r) && r.attempts >= policy.pipeline.mediaMaxAttempts).map((r) => r.id);
   if (ids.length === 0) return;
-  const failed = await deps.db
-    .update(media)
-    .set({
-      status: "failed",
-      claimedUntil: null,
-      providerUrl: null,
-      errorCode: sql`coalesce(${media.errorCode}, 'media_attempts_exhausted')`,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        inArray(media.id, ids),
-        sql`${media.attempts} >= ${policy.pipeline.mediaMaxAttempts}`,
-        or(eq(media.status, "pending"), and(eq(media.status, "downloading"), lt(media.claimedUntil, now))),
-      ),
-    )
-    .returning({ id: media.id, userId: media.userId });
+  // The old provider URL comes back from the CTE, so the staged original can be released too.
+  const failed = await selectRows<{ id: string; user_id: string; provider_url: string | null; provider: string | null }>(
+    deps.db,
+    sql`with old as (
+          select m.id, m.provider_url, coalesce(i.provider, u.provider) as provider
+          from media m join users u on u.id = m.user_id left join inbound_messages i on i.id = m.inbound_message_id
+          where m.id in (${sql.join(
+            ids.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}))
+        update media m
+        set status = 'failed', claimed_until = null, provider_url = null, updated_at = ${now.toISOString()}::timestamptz,
+            error_code = coalesce(m.error_code, 'media_attempts_exhausted')
+        from old
+        where m.id = old.id and m.attempts >= ${policy.pipeline.mediaMaxAttempts}
+          and (m.status = 'pending' or (m.status = 'downloading' and m.claimed_until < ${now.toISOString()}::timestamptz))
+        returning m.id, m.user_id, old.provider_url, old.provider`,
+  );
   for (const row of failed) {
-    await deleteBlob(deps, row.userId, row.id);
-    log.warn("media.download.exhausted", { mediaId: row.id, userId: row.userId });
+    await deleteBlob(deps, row.user_id, row.id);
+    await releaseSource(deps, { id: row.id, userId: row.user_id, providerUrl: row.provider_url, provider: row.provider });
+    log.warn("media.download.exhausted", { mediaId: row.id, userId: row.user_id });
   }
 }
 

@@ -48,11 +48,18 @@ next-env.d.ts
 /.data/
 /eval-results/
 
-# owner photo fixtures are private by default (repo is public); synthetic fixtures are committed
-/fixtures/**/*.jpg
-/fixtures/**/*.jpeg
-/fixtures/**/*.png
-/fixtures/**/*.heic
-/fixtures/**/*.HEIC
-/fixtures/**/*.webp
+# owner photo fixtures are private by default (repo is public); synthetic fixtures are committed.
+# Case-insensitive on purpose: iPhone exports are IMG_0001.JPG, and git matches case by default.
+/fixtures/**/*.[jJ][pP][gG]
+/fixtures/**/*.[jJ][pP][eE][gG]
+/fixtures/**/*.[pP][nN][gG]
+/fixtures/**/*.[hH][eE][iI][cCfF]
+/fixtures/**/*.[hH][eE][iI][cCfF][sS]
+/fixtures/**/*.[wW][eE][bB][pP]
+/fixtures/**/*.[gG][iI][fF]
+/fixtures/**/*.[aA][vV][iI][fF]
+/fixtures/**/*.[tT][iI][fF]
+/fixtures/**/*.[tT][iI][fF][fF]
+/fixtures/**/*.[dD][nN][gG]
+/fixtures/**/*.[mM][oO][vV]
 !/fixtures/synthetic/**

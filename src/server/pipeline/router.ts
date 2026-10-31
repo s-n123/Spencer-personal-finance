@@ -1,8 +1,9 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Provider } from "@/server/channels/types";
 import { getEnv } from "@/server/config/env";
 import { inboundMessages, media, turns, users } from "@/server/db/schema";
 import { selectRows } from "@/server/db/sql";
+import type { Db } from "@/server/db/types";
 import type { Deps } from "@/server/deps";
 import { AppError, logError, sanitizeError } from "@/server/errors";
 import { log } from "@/server/log";
@@ -52,15 +53,19 @@ export async function runTurn(deps: Deps, ctx: TurnContext, turn: ClaimedTurn): 
   const hasStop = rows.some((r) => r.keyword === "STOP");
 
   // 2. Commands, in message order. M1 implements START; the other keywords reach the agent (M4).
+  let confirmed = false;
   for (const r of rows) {
     if (r.keyword !== "START" || r.crisisKind) continue;
     if (await applyStart(deps, ctx, r)) {
-      await commitReply(deps, ctx, turn, { anchor: r.id, bubbles: [START_CONFIRMATION], kind: "command" });
+      await commitConfirmation(deps, ctx, turn, r.id, START_CONFIRMATION);
       outcome.done.push(r.id);
+      confirmed = true;
     } else {
       outcome.ignored.push(r.id);
     }
   }
+  // Sent before the agent runs, so a STOP during the model call can only come after it.
+  if (confirmed) await sendPending(deps, userId, { owner: ctx.lease, timing: ctx.timing });
 
   const user = await loadUser(deps, userId);
   const rest = rows.filter((r) => !r.crisisKind && r.keyword !== "STOP" && r.keyword !== "START");
@@ -85,15 +90,19 @@ export async function runTurn(deps: Deps, ctx: TurnContext, turn: ClaimedTurn): 
     return { mode, status: "done" };
   }
 
+  // The agent's signal also fires at the deadline, leaving sendReserveMs for the apology: the SDK's
+  // retry-after sleep ends only on abort, and the heartbeat would keep the lease all the while.
+  const budgetMs = ctx.deadlineMs - deps.clock.now().getTime() - ctx.timing.sendReserveMs;
+  const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(Math.max(0, budgetMs))]);
   let output: AgentTurnOutput;
   try {
-    output = await runAgentStep(deps, ctx, turn, user, rest);
+    output = await runAgentStep(deps, ctx, turn, user, rest, signal);
   } catch (err) {
     if (err instanceof LeaseLostError) throw err;
     if (ctx.signal.aborted) throw new LeaseLostError();
     logError("turn.failed", err, { userId, turnId: turn.id });
     const sanitized = sanitizeError(err);
-    const errorCode = (sanitized.errorCode ?? sanitized.errorName).slice(0, 60);
+    const errorCode = signal.aborted ? "deadline" : (sanitized.errorCode ?? sanitized.errorName).slice(0, 60);
     await failTurn(deps, ctx, turn, rest, errorCode, outcome);
     return { mode: "agent", status: "failed" };
   }
@@ -111,13 +120,14 @@ async function runAgentStep(
   turn: ClaimedTurn,
   user: UserRow,
   rest: ClaimedMessage[],
+  signal: AbortSignal,
 ): Promise<AgentTurnOutput> {
   startTyping(deps, user);
   await ctx.checkpoint();
   const ready = await deps.pipeline.ensureMedia(
     deps,
     rest.map((r) => r.id),
-    ctx.signal,
+    signal,
   );
   await ctx.checkpoint();
   const output = await deps.pipeline.runAgent(deps, {
@@ -128,7 +138,7 @@ async function runAgentStep(
     messages: rest,
     images: ready.ready,
     failedImageCount: ready.failed.length,
-    signal: ctx.signal,
+    signal,
     deadlineMs: ctx.deadlineMs,
   });
   if (ctx.signal.aborted) throw new LeaseLostError();
@@ -188,6 +198,29 @@ async function commitReply(
   });
 }
 
+/**
+ * A command's confirmation, fenced. It is written only once the command took effect, so it is a
+ * pause-checked 'reply': a STOP that lands before it is sent makes it untrue. The turn stays
+ * 'claimed', so recovery still re-runs the agent part (applyStart is idempotent; the key dedupes).
+ */
+async function commitConfirmation(
+  deps: Deps,
+  ctx: TurnContext,
+  turn: ClaimedTurn,
+  anchor: string,
+  text: string,
+): Promise<void> {
+  const written = await writeReplyIntents(deps, {
+    userId: ctx.lease.userId,
+    turnId: turn.id,
+    anchorInboundId: anchor,
+    bubbles: [text],
+    kind: "reply",
+    lease: ctx.lease,
+  });
+  if (!written.fenced) throw new LeaseLostError();
+}
+
 /** Closes the turn: row statuses plus the turn's final status and mode, fenced. */
 export async function finishTurn(
   deps: Deps,
@@ -198,7 +231,7 @@ export async function finishTurn(
   status: "done" | "failed",
   errorCode: string | null = null,
 ): Promise<void> {
-  await deps.db.transaction(async (tx) => {
+  const unused = await deps.db.transaction(async (tx) => {
     const now = deps.clock.now();
     const fence = leaseFence(ctx.lease, now);
     const groups = [
@@ -220,13 +253,58 @@ export async function finishTurn(
           ),
         );
     }
+    // A refused re-run stays 'safety', which keeps it out of history (D-126).
+    const finalMode = turn.mode === "recovery" && mode !== "safety" ? "recovery" : mode;
     const updated = await tx
       .update(turns)
-      .set({ status, mode: turn.mode === "recovery" ? "recovery" : mode, finishedAt: now, errorCode })
+      .set({ status, mode: finalMode, finishedAt: now, errorCode })
       .where(and(eq(turns.id, turn.id), fence))
       .returning({ id: turns.id });
     if (updated.length === 0) throw new LeaseLostError();
+    return discardUnusedMedia(tx, [...rows.ignored, ...rows.failed], now, fence);
   });
+  for (const m of unused) await releaseStagedMedia(deps, m);
+}
+
+interface UnusedMedia {
+  id: string;
+  user_id: string;
+  provider_url: string | null;
+  provider: string;
+}
+
+/**
+ * Photos of rows no turn will process again (ignored, failed) are never downloaded: fail them and
+ * clear their provider URL, returning it so the adapter can drop the staged original, which still
+ * has EXIF and GPS (D-050). A row a downloader holds is left to it; it stores and releases.
+ */
+function discardUnusedMedia(tx: Db, inboundIds: string[], now: Date, fence: SQL): Promise<UnusedMedia[]> {
+  if (inboundIds.length === 0) return Promise.resolve([]);
+  const ids = sql.join(
+    inboundIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  return selectRows<UnusedMedia>(
+    tx,
+    sql`with old as (
+          select m.id, m.provider_url, i.provider from media m join inbound_messages i on i.id = m.inbound_message_id
+          where m.inbound_message_id in (${ids}))
+        update media m
+        set status = 'failed', error_code = 'media_unused', provider_url = null, claimed_until = null, updated_at = ${sqlTs(now)}
+        from old
+        where m.id = old.id and ${fence}
+          and (m.status = 'pending' or (m.status = 'downloading' and m.claimed_until < ${sqlTs(now)}))
+        returning m.id, m.user_id, old.provider_url, old.provider`,
+  );
+}
+
+async function releaseStagedMedia(deps: Deps, m: UnusedMedia): Promise<void> {
+  if (!m.provider_url) return;
+  try {
+    await deps.adapters.get(m.provider as Provider).releaseMedia?.(m.provider_url);
+  } catch (err) {
+    logError("media.source.release_failed", err, { mediaId: m.id, userId: m.user_id });
+  }
 }
 
 /** A turn that failed after its claim still answers, so the user isn't left hanging. */

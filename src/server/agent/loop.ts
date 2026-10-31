@@ -3,6 +3,7 @@ import { policy } from "@/server/config/policy";
 import type { TurnIterationUsage } from "@/server/db/schema";
 import type { Deps } from "@/server/deps";
 import { logError } from "@/server/errors";
+import { log } from "@/server/log";
 import { LlmCallError, toLlmCallError } from "./errors";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import type { ContentBlockParam, LlmCallOptions, LlmRequest, Message, MessageParam, ToolUnion } from "./types";
@@ -60,13 +61,19 @@ export function withLastToolCached(tools: readonly ToolUnion[]): ToolUnion[] {
 
 /**
  * Per-call budget from the invocation deadline (DECISIONS D-035). Returns null when too little is
- * left to make a call at all. The signal also cuts short the SDK's retry-after sleeps.
+ * left to make a call at all. `timeout` bounds each attempt but not the SDK's retry-after sleep
+ * between attempts, which only an abort ends; the returned signal also fires at the deadline.
  */
 export function callOptions(now: Date, deadlineMs: number, signal: AbortSignal): LlmCallOptions | null {
   const remaining = deadlineMs - now.getTime();
-  const timeoutMs = Math.min(policy.agent.llmCallTimeoutMs, remaining - policy.agent.llmDeadlineMarginMs);
+  const budgetMs = remaining - policy.agent.llmDeadlineMarginMs;
+  const timeoutMs = Math.min(policy.agent.llmCallTimeoutMs, budgetMs);
   if (timeoutMs <= 0) return null;
-  return { signal, timeoutMs, maxRetries: remaining > policy.agent.llmRetryMinRemainingMs ? 1 : 0 };
+  return {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(budgetMs)]),
+    timeoutMs,
+    maxRetries: remaining > policy.agent.llmRetryMinRemainingMs ? 1 : 0,
+  };
 }
 
 export interface LoopInput extends Omit<RequestSpec, "messages"> {
@@ -120,7 +127,9 @@ export async function runLoop(deps: Deps, input: LoopInput): Promise<LoopResult>
       return done({ kind: "error", error: mapUnlogged("agent.call_failed", err) });
     }
     stopReason = res.stop_reason;
-    usage.push(iterationUsage(res, deps.clock.now().getTime() - startedAt));
+    const iteration = iterationUsage(res, deps.clock.now().getTime() - startedAt);
+    usage.push(iteration);
+    if (iteration.attempts) log.info("llm.fallback_served", { userId: input.userId, model: res.model });
 
     switch (res.stop_reason) {
       case "end_turn":
@@ -223,12 +232,28 @@ function afterLastFallback(content: ContentBlock[]): ContentBlock[] {
 }
 
 function iterationUsage(res: Message, latencyMs: number): TurnIterationUsage {
-  return {
+  const u = res.usage;
+  const usage: TurnIterationUsage = {
     latencyMs,
-    inputTokens: res.usage.input_tokens,
-    outputTokens: res.usage.output_tokens,
-    cacheReadTokens: res.usage.cache_read_input_tokens ?? 0,
-    cacheWriteTokens: res.usage.cache_creation_input_tokens ?? 0,
+    model: res.model,
+    inputTokens: u.input_tokens,
+    outputTokens: u.output_tokens,
+    cacheReadTokens: u.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+    cacheWrite1hTokens: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
     stopReason: res.stop_reason,
   };
+  // A fallback-served response is billed per attempt (usage.iterations); top-level usage covers
+  // only the attempt that produced it.
+  if (u.iterations?.some((i) => i.type === "fallback_message")) {
+    usage.attempts = u.iterations.map((i) => ({
+      type: i.type,
+      model: "model" in i ? i.model : null,
+      inputTokens: i.input_tokens,
+      outputTokens: i.output_tokens,
+      cacheReadTokens: i.cache_read_input_tokens,
+      cacheWriteTokens: i.cache_creation_input_tokens,
+    }));
+  }
+  return usage;
 }

@@ -1,13 +1,15 @@
 import "./_env";
 import { spawn } from "node:child_process";
 import { getEnv } from "../src/server/config/env";
+import { nextDevArgs } from "./_cli";
 import { isListening, isPgliteDevUrl, PGLITE_HOST, PGLITE_PORT, startPgliteServer, type DevDbServer } from "./db-dev";
 import { runMigrations } from "./migrate";
 
 // `npm run dev`: env (.env.local via _env.ts) -> the PGlite dev server, started in this process if
 // DATABASE_URL points at it and nothing is listening yet -> migrations -> `next dev`. Ctrl-C stops
 // Next first, then closes PGlite cleanly so its data directory is never left mid-write.
-// Extra arguments go to `next dev` (npm run dev -- --port 3001).
+// Extra arguments go to `next dev` (npm run dev -- --port 3001). It listens on 127.0.0.1 unless
+// they set a host (npm run dev -- -H 0.0.0.0 to reach it from another device).
 
 const SHUTDOWN_GRACE_MS = 5_000;
 
@@ -27,7 +29,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const next = spawn("npx", ["next", "dev", ...process.argv.slice(2)], {
+  const next = spawn("npx", nextDevArgs(process.argv.slice(2)), {
     stdio: "inherit",
     env: process.env,
     shell: process.platform === "win32",

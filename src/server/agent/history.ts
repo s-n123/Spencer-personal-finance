@@ -1,18 +1,4 @@
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  exists,
-  inArray,
-  isNotNull,
-  isNull,
-  ne,
-  notExists,
-  notInArray,
-  or,
-  sql,
-} from "drizzle-orm";
+import { and, asc, desc, eq, exists, inArray, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
 import { policy } from "@/server/config/policy";
 import { inboundMessages, media, outboundMessages, turns } from "@/server/db/schema";
 import type { Db } from "@/server/db/types";
@@ -46,11 +32,6 @@ export async function loadHistory(db: Db, q: HistoryQuery): Promise<HistoryMessa
   const exchanges = q.exchanges ?? policy.agent.historyExchanges;
   if (exchanges <= 0) return [];
 
-  const outboundOfTurn = (kinds: string[]) =>
-    db
-      .select({ one: sql`1` })
-      .from(outboundMessages)
-      .where(and(eq(outboundMessages.turnId, turns.id), inArray(outboundMessages.kind, kinds)));
   const prior = await db
     .select({ id: turns.id })
     .from(turns)
@@ -64,12 +45,11 @@ export async function loadHistory(db: Db, q: HistoryQuery): Promise<HistoryMessa
             .from(inboundMessages)
             .where(and(eq(inboundMessages.turnId, turns.id), eq(inboundMessages.status, "done"))),
         ),
-        // A turn answered only by safety copy (an agent refusal) is left out whole. Its reply is
-        // never history, so its text would otherwise come back as "unanswered" and be re-sent,
-        // inviting the same refusal. The outbound check also covers a refused turn that recovery
-        // finished under its claim-time mode.
+        // A refused turn is left out whole (D-126): replaying the refused text, or the refusal copy
+        // after it, would invite the same refusal. It is marked 'safety' at commit; the stop reason
+        // also covers one closed under another mode.
         ne(turns.mode, "safety"),
-        or(notExists(outboundOfTurn(["safety"])), exists(outboundOfTurn(HISTORY_OUTBOUND_KINDS))),
+        sql`${turns.stopReason} is distinct from 'refusal'`,
       ),
     )
     .orderBy(desc(turns.startedAt), desc(turns.createdAt))

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
+import { isMainModule } from "./_cli";
 
 // Applies migrations over the unpooled URL under an advisory lock, then verifies that every
 // journal entry was applied with a matching hash. drizzle-orm 0.45's migrator silently skips
@@ -56,8 +57,7 @@ async function verifyApplied(client: pg.Client): Promise<void> {
   }
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   const url = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
   if (!url) {
     console.error("DATABASE_URL (or DATABASE_URL_UNPOOLED) is required");

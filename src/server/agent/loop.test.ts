@@ -1,3 +1,4 @@
+import Anthropic, { APIUserAbortError } from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { policy } from "@/server/config/policy";
 import type { Db } from "@/server/db/types";
@@ -63,11 +64,50 @@ describe("callOptions", () => {
     [policy.agent.llmRetryMinRemainingMs, policy.agent.llmCallTimeoutMs, 0],
     [80_000, 80_000 - policy.agent.llmDeadlineMarginMs, 0],
   ])("with %i ms left: timeout %i, maxRetries %i", (remaining, timeoutMs, maxRetries) => {
-    expect(callOptions(NOW, NOW.getTime() + remaining, signal)).toEqual({ signal, timeoutMs, maxRetries });
+    const opts = callOptions(NOW, NOW.getTime() + remaining, signal);
+    expect({ timeoutMs: opts?.timeoutMs, maxRetries: opts?.maxRetries }).toEqual({ timeoutMs, maxRetries });
   });
 
   it("returns null when the margin leaves no time for a call", () => {
     expect(callOptions(NOW, NOW.getTime() + policy.agent.llmDeadlineMarginMs, signal)).toBeNull();
+  });
+
+  it("aborts at the deadline margin, so a long retry-after can't outlive the invocation", async () => {
+    let fetches = 0;
+    const client = new Anthropic({
+      apiKey: "test-key",
+      maxRetries: 0,
+      fetch: async () => {
+        fetches += 1;
+        const body = JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "slow down" } });
+        return new Response(body, { status: 429, headers: { "content-type": "application/json", "retry-after": "600" } });
+      },
+    });
+    const lease = new AbortController();
+    const opts = callOptions(NOW, NOW.getTime() + policy.agent.llmDeadlineMarginMs + 50, lease.signal);
+    if (!opts) throw new Error("expected a call budget");
+    const call = client.beta.messages.create(
+      { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] },
+      // A retry is forced so the SDK sleeps out the retry-after; only the signal can end that sleep.
+      { signal: opts.signal, timeout: opts.timeoutMs, maxRetries: 1 },
+    );
+    const outcome = await Promise.race([
+      call.then(
+        () => "resolved",
+        (err: unknown) => err,
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("still asleep"), 2_000)),
+    ]);
+    expect(outcome).toBeInstanceOf(APIUserAbortError);
+    expect(fetches).toBe(1);
+    expect(lease.signal.aborted).toBe(false);
+  });
+
+  it("still follows the caller's signal", () => {
+    const lease = new AbortController();
+    const opts = callOptions(NOW, NOW.getTime() + 300_000, lease.signal);
+    lease.abort(new Error("lease lost"));
+    expect(opts?.signal.aborted).toBe(true);
   });
 });
 
